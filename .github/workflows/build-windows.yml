@@ -93,10 +93,10 @@ jobs:
           # === Accessibility layer for screen readers (NVDA/JAWS/Narrator) ===
           target_sources(Telegram
           PRIVATE
-              ui/accessibility/telegram_accessibility.cpp
-              ui/accessibility/telegram_accessibility.h
-              ui/accessibility/telegram_accessibility_names.h
-              ui/accessibility/telegram_accessibility_keyboard.h
+              SourceFiles/ui/accessibility/telegram_accessibility.cpp
+              SourceFiles/ui/accessibility/telegram_accessibility.h
+              SourceFiles/ui/accessibility/telegram_accessibility_names.h
+              SourceFiles/ui/accessibility/telegram_accessibility_keyboard.h
           )
           # === End accessibility layer ===
           PATCH

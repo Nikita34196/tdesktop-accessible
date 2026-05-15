@@ -1,7 +1,4 @@
 # Build Telegram Desktop with Accessibility for Screen Readers
-# Builds on push to main/dev and on manual trigger
-# Produces a ready-to-download Telegram.exe in Releases
-
 name: Windows Accessible Build
 
 on:
@@ -13,7 +10,7 @@ on:
       - 'LICENSE'
   pull_request:
     branches: [main]
-  workflow_dispatch:        # manual trigger from GitHub UI
+  workflow_dispatch:
   release:
     types: [published]
 
@@ -21,16 +18,10 @@ jobs:
   windows:
     name: Build Windows x64
     runs-on: windows-latest
-    timeout-minutes: 360    # 6 hours max (first build is slow)
+    timeout-minutes: 360
 
     env:
       REPO_NAME: tdesktop
-      PREPARE_PATH: Telegram/build/prepare/prepare.py
-      UPLOAD_ARTIFACT: "true"
-
-    defaults:
-      run:
-        shell: cmd
 
     steps:
       # ============================================
@@ -42,7 +33,29 @@ jobs:
           path: accessibility-patch
 
       # ============================================
-      # 2. Clone official Telegram Desktop
+      # 2. Set up Visual Studio environment
+      # ============================================
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # ============================================
+      # 3. Install build tools
+      # ============================================
+      - name: Install tools
+        run: |
+          choco install --no-progress -y nasm yasm jom
+
+      - name: Add tools to PATH
+        shell: bash
+        run: |
+          echo "C:\ProgramData\chocolatey\lib\nasm\tools" >> $GITHUB_PATH
+          echo "C:\ProgramData\chocolatey\lib\yasm\tools" >> $GITHUB_PATH
+          echo "C:\ProgramData\chocolatey\lib\jom\tools" >> $GITHUB_PATH
+
+      # ============================================
+      # 4. Clone official Telegram Desktop
       # ============================================
       - name: Clone Telegram Desktop
         shell: bash
@@ -57,17 +70,17 @@ jobs:
           echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
       # ============================================
-      # 3. Copy accessibility files into source tree
+      # 5. Copy accessibility files into source tree
       # ============================================
       - name: Install accessibility layer
         shell: bash
         run: |
           mkdir -p $REPO_NAME/Telegram/SourceFiles/ui/accessibility
           cp accessibility-patch/accessibility/*.h   $REPO_NAME/Telegram/SourceFiles/ui/accessibility/
-          cp accessibility-patch/accessibility/*.cpp $REPO_NAME/Telegram/SourceFiles/ui/accessibility/
+          cp accessibility-patch/accessibility/*.cpp  $REPO_NAME/Telegram/SourceFiles/ui/accessibility/
 
       # ============================================
-      # 4. Patch CMakeLists.txt
+      # 6. Patch CMakeLists.txt
       # ============================================
       - name: Patch CMakeLists.txt
         shell: bash
@@ -93,99 +106,127 @@ jobs:
           fi
 
       # ============================================
-      # 5. Patch Application startup
+      # 7. Patch Application startup
       # ============================================
       - name: Patch Application init
         shell: python
         run: |
-          import os, re
+          import os, re, glob
 
-          app_cpp = os.path.join(os.environ['REPO_NAME'],
-                                 'Telegram', 'SourceFiles', 'core', 'application.cpp')
+          # Find application.cpp
+          app_cpp = None
+          for pattern in [
+              'tdesktop/Telegram/SourceFiles/core/application.cpp',
+              'tdesktop/Telegram/SourceFiles/application.cpp',
+          ]:
+              matches = glob.glob(pattern)
+              if matches:
+                  app_cpp = matches[0]
+                  break
 
-          if not os.path.exists(app_cpp):
-              # Try alternative paths
-              for alt in ['application.cpp', 'core/application.cpp']:
-                  p = os.path.join(os.environ['REPO_NAME'], 'Telegram', 'SourceFiles', alt)
-                  if os.path.exists(p):
-                      app_cpp = p
+          if not app_cpp:
+              # Search recursively
+              for root, dirs, files in os.walk('tdesktop/Telegram/SourceFiles'):
+                  for f in files:
+                      if f == 'application.cpp' and 'core' in root:
+                          app_cpp = os.path.join(root, f)
+                          break
+                  if app_cpp:
                       break
+
+          if not app_cpp:
+              print("WARNING: application.cpp not found!")
+              exit(0)
+
+          print(f"Found: {app_cpp}")
 
           with open(app_cpp, 'r', encoding='utf-8') as f:
               content = f.read()
 
           if 'TgAccessibility' in content:
               print('Already patched')
-          else:
-              # Add include after the last #include
-              include_block = (
-                  '\n// Accessibility for NVDA / screen readers\n'
-                  '#include "ui/accessibility/telegram_accessibility.h"\n'
-                  '#include "ui/accessibility/telegram_accessibility_names.h"\n'
-              )
+              exit(0)
 
-              # Find the last #include line
-              includes = list(re.finditer(r'^#include\s+.*$', content, re.MULTILINE))
-              if includes:
-                  last_include_end = includes[-1].end()
-                  content = content[:last_include_end] + include_block + content[last_include_end:]
+          # Add include after the last #include
+          include_block = (
+              '\n// Accessibility for NVDA / screen readers\n'
+              '#include "ui/accessibility/telegram_accessibility.h"\n'
+              '#include "ui/accessibility/telegram_accessibility_names.h"\n'
+          )
 
-              # Find Application constructor or run/start/create method and add Install()
-              # Look for patterns like "void Application::run(" or constructor
-              init_patterns = [
-                  r'(Application::(?:run|start|startMain|create|launch)\s*\([^)]*\)\s*\{)',
-                  r'(Application::Application\s*\([^)]*\)\s*(?::[^{]*)?\{)',
-              ]
+          includes = list(re.finditer(r'^#include\s+.*$', content, re.MULTILINE))
+          if includes:
+              pos = includes[-1].end()
+              content = content[:pos] + include_block + content[pos:]
 
-              inserted = False
-              for pattern in init_patterns:
-                  match = re.search(pattern, content, re.DOTALL)
-                  if match:
-                      insert_pos = match.end()
-                      init_code = (
-                          '\n    // Install screen reader accessibility layer\n'
-                          '    TgAccessibility::Install();\n'
-                      )
-                      content = content[:insert_pos] + init_code + content[insert_pos:]
-                      inserted = True
-                      print(f'Inserted Install() after: {match.group(1)[:60]}...')
-                      break
+          # Find a good place to insert Install() call
+          init_patterns = [
+              r'(Application::run\s*\([^)]*\)\s*\{)',
+              r'(Application::startMain\s*\([^)]*\)\s*\{)',
+              r'(Application::start\s*\([^)]*\)\s*\{)',
+              r'(Application::create\s*\([^)]*\)\s*\{)',
+              r'(Application::launch\s*\([^)]*\)\s*\{)',
+              r'(Application::init\s*\([^)]*\)\s*\{)',
+          ]
 
-              if not inserted:
-                  print('WARNING: Could not find insertion point for Install()')
-                  print('Manual patching may be needed')
+          inserted = False
+          for pattern in init_patterns:
+              match = re.search(pattern, content, re.DOTALL)
+              if match:
+                  insert_pos = match.end()
+                  init_code = (
+                      '\n    // Install screen reader accessibility layer\n'
+                      '    TgAccessibility::Install();\n'
+                  )
+                  content = content[:insert_pos] + init_code + content[insert_pos:]
+                  inserted = True
+                  print(f'Inserted Install() into: {match.group(1)[:60]}')
+                  break
 
-              with open(app_cpp, 'w', encoding='utf-8') as f:
-                  f.write(content)
+          if not inserted:
+              # Fallback: try to find any function body in Application class
+              match = re.search(r'(Application::Application\s*\([^)]*\)\s*(?::[^{]*)?\{)', content, re.DOTALL)
+              if match:
+                  insert_pos = match.end()
+                  init_code = (
+                      '\n    // Install screen reader accessibility layer\n'
+                      '    TgAccessibility::Install();\n'
+                  )
+                  content = content[:insert_pos] + init_code + content[insert_pos:]
+                  inserted = True
+                  print(f'Inserted Install() into constructor')
 
-              print(f'Patched: {app_cpp}')
+          if not inserted:
+              print('WARNING: Could not find insertion point')
+              print('Searching for any suitable function...')
+              # Last resort: just add it and hope for the best
+              match = re.search(r'void\s+Application::\w+\([^)]*\)\s*\{', content)
+              if match:
+                  insert_pos = match.end()
+                  init_code = (
+                      '\n    // Install screen reader accessibility layer\n'
+                      '    TgAccessibility::Install();\n'
+                  )
+                  content = content[:insert_pos] + init_code + content[insert_pos:]
+                  print(f'Inserted into: {match.group()[:60]}')
+
+          with open(app_cpp, 'w', encoding='utf-8') as f:
+              f.write(content)
+
+          print('Patch complete')
 
       # ============================================
-      # 6. Set up build environment
-      # ============================================
-      - name: Set up environment
-        shell: bash
-        run: |
-          echo "TBUILD=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-
-          # Convert to Windows path for libraries
-          p=$(pwd | sed 's#^/[d]#d:#g' | sed 's#/#\\\\#g')
-          echo "LibrariesPath=${p}\\Libraries" >> $GITHUB_ENV
-
-          mkdir -p Libraries
-
-      - name: Install tools
-        run: |
-          choco install --no-progress -y nasm yasm jom ninja
-
-      # ============================================
-      # 7. Cache third-party libraries
+      # 8. Cache third-party libraries
       # ============================================
       - name: Generate cache key
         shell: bash
         run: |
-          echo "$(sha256sum $REPO_NAME/$PREPARE_PATH | awk '{ print $1 }')" > CACHE_KEY.txt
-          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> $GITHUB_ENV
+          PREPARE_FILE="$REPO_NAME/Telegram/build/prepare/prepare.py"
+          if [ -f "$PREPARE_FILE" ]; then
+            echo "CACHE_KEY=$(sha256sum $PREPARE_FILE | awk '{ print $1 }')" >> $GITHUB_ENV
+          else
+            echo "CACHE_KEY=no-prepare-file" >> $GITHUB_ENV
+          fi
 
       - name: Restore libraries cache
         id: cache-libs
@@ -195,47 +236,58 @@ jobs:
           key: win-x64-libs-${{ env.CACHE_KEY }}
 
       # ============================================
-      # 8. Prepare libraries (if not cached)
+      # 9. Prepare libraries (if not cached)
       # ============================================
       - name: Prepare libraries
         if: steps.cache-libs.outputs.cache-hit != 'true'
+        shell: cmd
         run: |
           cd %REPO_NAME%
           python Telegram\build\prepare\prepare.py --arch x64
 
       # ============================================
-      # 9. Configure
+      # 10. Configure
       # ============================================
       - name: Configure
+        shell: cmd
         run: |
           cd %REPO_NAME%\Telegram
-          call configure.bat x64 ^
-            -D TDESKTOP_API_ID=${{ secrets.API_ID }} ^
-            -D TDESKTOP_API_HASH=${{ secrets.API_HASH }}
+          call configure.bat x64 -D TDESKTOP_API_ID=${{ secrets.API_ID }} -D TDESKTOP_API_HASH=${{ secrets.API_HASH }}
 
       # ============================================
-      # 10. Build
+      # 11. Build
       # ============================================
       - name: Build
+        shell: cmd
         run: |
           cd %REPO_NAME%
-          cmake --build out --config Release --target Telegram -- -j%NUMBER_OF_PROCESSORS%
+          cmake --build out --config Release --target Telegram --parallel
 
       # ============================================
-      # 11. Package
+      # 12. Package
       # ============================================
       - name: Prepare artifact
         shell: bash
         run: |
           mkdir -p artifact
-          cp $REPO_NAME/out/Release/Telegram.exe artifact/ 2>/dev/null || \
-          cp $REPO_NAME/out/Telegram.exe artifact/ 2>/dev/null || \
+
+          # Find Telegram.exe wherever it ended up
           find $REPO_NAME/out -name "Telegram.exe" -exec cp {} artifact/ \;
 
           # Copy runtime DLLs if any
           find $REPO_NAME/out -name "*.dll" -exec cp {} artifact/ \; 2>/dev/null || true
 
+          # Version file
           echo "${{ env.TDESKTOP_VERSION }}-accessible" > artifact/version.txt
+
+          # Check we have the exe
+          if [ ! -f artifact/Telegram.exe ]; then
+            echo "ERROR: Telegram.exe not found!"
+            find $REPO_NAME/out -type f -name "*.exe" | head -20
+            exit 1
+          fi
+
+          echo "Telegram.exe found, size: $(du -h artifact/Telegram.exe | cut -f1)"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -245,7 +297,7 @@ jobs:
           retention-days: 90
 
       # ============================================
-      # 12. Create Release (on tag push only)
+      # 13. Create Release (on tag push only)
       # ============================================
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -258,15 +310,14 @@ jobs:
             Сборка на основе Telegram Desktop ${{ env.TDESKTOP_VERSION }}
             с поддержкой скринридеров (NVDA, JAWS, Narrator).
 
-            ### Что нового
-            - Все элементы интерфейса озвучиваются скринридером
-            - F6 — переключение между панелями (чаты / сообщения / ввод)
-            - Escape — возврат в список чатов
-
             ### Установка
             1. Скачайте `Telegram.exe`
-            2. Запустите (установка не требуется — portable версия)
+            2. Запустите
             3. Включите NVDA
+
+            ### Горячие клавиши
+            - **F6** — переключение между панелями
+            - **Escape** — возврат в список чатов
 
             > Собрано на базе tdesktop@${{ env.SHORT_SHA }}
         env:

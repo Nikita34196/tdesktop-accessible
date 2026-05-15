@@ -243,7 +243,7 @@ jobs:
         shell: cmd
         run: |
           cd %REPO_NAME%
-          python Telegram\build\prepare\prepare.py --arch x64
+          python Telegram\build\prepare\prepare.py
 
       # ============================================
       # 10. Configure

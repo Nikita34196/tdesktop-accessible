@@ -135,18 +135,33 @@ const TypeRule kTypeRules[] = {
     { "Ui::PasswordInput",    "Password",         QAccessible::EditableText },
     { "Ui::PhoneInput",       "Phone number",     QAccessible::EditableText },
 
-    // -- Buttons --
+    // -- Buttons (specific names first, generic catch-all last) --
     { "Ui::IconButton",       nullptr,            QAccessible::PushButton },
     { "Ui::RoundButton",      nullptr,            QAccessible::PushButton },
     { "Ui::FlatButton",       nullptr,            QAccessible::PushButton },
     { "Ui::LinkButton",       nullptr,            QAccessible::Link },
     { "Ui::SettingsButton",   nullptr,            QAccessible::PushButton },
+    { "Ui::EmojiButton",      nullptr,            QAccessible::PushButton },
+    { "Ui::CrossButton",      nullptr,            QAccessible::PushButton },
+    { "Ui::JumpDownButton",   nullptr,            QAccessible::PushButton },
+    { "Ui::SendButton",       "Отправить",        QAccessible::PushButton },
+    { "VoiceRecordButton",    "Записать голосовое сообщение", QAccessible::PushButton },
+    { "ComposeAiButton",      nullptr,            QAccessible::PushButton },
+    { "RecordLock",           nullptr,            QAccessible::PushButton },
+    { "CancelButton",         "Отменить",         QAccessible::PushButton },
+    { "Ui::AbstractButton",   nullptr,            QAccessible::PushButton },
+    { "Ui::Menu::Action",     nullptr,            QAccessible::MenuItem },
+    // Fallback: anything whose dynamic type name still contains "Button"
+    // (e.g. third-party or namespace-qualified button subclasses we haven't
+    // explicitly listed). MUST stay last among button rules so the more
+    // specific entries above take precedence and keep their roles/names.
+    { "Button",               nullptr,            QAccessible::PushButton },
 
     // -- Other --
     { "Ui::FlatLabel",        nullptr,            QAccessible::StaticText },
     { "Ui::LabelSimple",      nullptr,            QAccessible::StaticText },
-    { "Ui::ScrollArea",       nullptr,            QAccessible::ScrollBar },
-    { "Ui::ElasticScroll",    nullptr,            QAccessible::ScrollBar },
+    { "Ui::ScrollArea",       nullptr,            QAccessible::Pane },
+    { "Ui::ElasticScroll",    nullptr,            QAccessible::Pane },
     { "Ui::LayerWidget",      "Dialog",           QAccessible::Dialog },
     { "Ui::BoxContent",       nullptr,            QAccessible::Pane },
     { "Window::SectionWidget","Section",          QAccessible::Pane },
@@ -409,18 +424,33 @@ QStringList ButtonAccessible::actionNames() const {
 }
 
 void ButtonAccessible::doAction(const QString &actionName) {
-    if (actionName == QAccessibleActionInterface::pressAction()) {
-        auto *w = widget();
-        if (w) {
-            QPoint center = w->rect().center();
-            QMouseEvent press(QEvent::MouseButtonPress, center,
-                w->mapToGlobal(center), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QMouseEvent release(QEvent::MouseButtonRelease, center,
-                w->mapToGlobal(center), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(w, &press);
-            QApplication::sendEvent(w, &release);
-        }
+    if (actionName != QAccessibleActionInterface::pressAction()) {
+        return;
     }
+    auto *w = widget();
+    if (!w || !w->isVisible() || !w->isEnabled()) {
+        return;
+    }
+
+    // Make sure keyboard focus follows the activation. Some Telegram
+    // widgets check hasFocus() before reacting; setting it before the
+    // mouse events also keeps NVDA's reported focus consistent.
+    if (w->focusPolicy() != Qt::NoFocus) {
+        w->setFocus(Qt::OtherFocusReason);
+    }
+
+    const QPoint local = w->rect().center();
+    const QPoint global = w->mapToGlobal(local);
+
+    QMouseEvent press(QEvent::MouseButtonPress, local, global,
+        Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    // For MouseButtonRelease the `buttons` field is the state AFTER the
+    // release — no buttons should remain pressed. Several widgets in
+    // lib_ui check this and ignore the click if it's wrong.
+    QMouseEvent release(QEvent::MouseButtonRelease, local, global,
+        Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(w, &press);
+    QApplication::sendEvent(w, &release);
 }
 
 // =====================================================================

@@ -362,6 +362,172 @@ jobs:
           print('history_inner_widget.cpp patched')
 
       # ============================================
+      # 7c. Make Up/Down arrows step through messages for screen readers.
+      #     Mirrors what upstream Dialogs::InnerWidget already does for the
+      #     chat list (processKeyDispatch -> selectSkip -> announceSelectedFocus
+      #     -> accessibilityChildFocused(index)). HistoryInner's upstream
+      #     keyPressEvent ignores arrows entirely (they go to
+      #     _widget->tryProcessKeyInput); we intercept Up/Down/PageUp/PageDown/
+      #     Home/End only when ScreenReaderModeActive() is true, so sighted
+      #     users keep the original behavior.
+      # ============================================
+      - name: Patch HistoryInner for arrow-key a11y navigation
+        shell: python
+        run: |
+          import os, re
+
+          h_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.h'
+          cpp_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.cpp'
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skipping a11y key patch')
+                  exit(0)
+
+          # --- header: declare a11yProcessKey + _a11yCurrentIndex field ---
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'a11yProcessKey' in h:
+              print('history_inner_widget.h already patched (a11y key)')
+          else:
+              # Append the method declaration right after the existing
+              # a11yRecomputeVisible() declaration so it sits inside the
+              # same private accessibility block.
+              h, n = re.subn(
+                  r'(void\s+a11yRecomputeVisible\s*\(\s*\)\s*;)',
+                  lambda m: m.group(1) + '\n\tbool a11yProcessKey(QKeyEvent *e);\n',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: a11yRecomputeVisible landmark not found')
+                  exit(1)
+
+              # Add the current-index field next to the visible-items cache.
+              h, n = re.subn(
+                  r'(mutable std::vector<A11yVisibleItem>\s+_a11yVisibleItems\s*;)',
+                  lambda m: m.group(1) + '\n\tint _a11yCurrentIndex = -1;\n',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: _a11yVisibleItems landmark not found')
+                  exit(1)
+
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('history_inner_widget.h patched (a11y key)')
+
+          # --- cpp: inject call at top of keyPressEvent, update child state,
+          #         and append the a11yProcessKey definition. ---
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'a11yProcessKey' in cpp:
+              print('history_inner_widget.cpp already patched (a11y key)')
+              exit(0)
+
+          # Add the screen-reader-mode include if it's not already present.
+          # ScreenReaderModeActive() lives in ui/screen_reader_mode.h.
+          if 'ui/screen_reader_mode.h' not in cpp:
+              cpp, n = re.subn(
+                  r'(#include\s+"ui/[^"]+"\s*\n)(?=(?:[^#]|#[^i]))',
+                  lambda m: m.group(1) + '#include "ui/screen_reader_mode.h"\n',
+                  cpp,
+                  count=1)
+              if n == 0:
+                  # Fallback: just stick it after the first #include line.
+                  cpp, n = re.subn(
+                      r'(^#include\s+.*\n)',
+                      lambda m: m.group(1) + '#include "ui/screen_reader_mode.h"\n',
+                      cpp,
+                      count=1,
+                      flags=re.MULTILINE)
+                  if n == 0:
+                      print('ERROR: could not insert screen_reader_mode.h include')
+                      exit(1)
+
+          # Inject `if (a11yProcessKey(e)) return;` at the very top of
+          # the existing HistoryInner::keyPressEvent body. The original
+          # logic (Escape, Copy, Delete, tryProcessKeyInput, ...) stays
+          # intact and runs whenever a11yProcessKey returns false.
+          cpp, n = re.subn(
+              r'(void\s+HistoryInner::keyPressEvent\s*\(\s*QKeyEvent\s*\*\s*e\s*\)\s*\{)',
+              lambda m: m.group(1) + '\n\tif (a11yProcessKey(e)) return;',
+              cpp,
+              count=1)
+          if n == 0:
+              print('ERROR: HistoryInner::keyPressEvent landmark not found')
+              exit(1)
+
+          # Mark the currently-focused child in accessibilityChildState so
+          # NVDA reports the correct active row when it queries state.
+          cpp, n = re.subn(
+              r'(QAccessible::State HistoryInner::accessibilityChildState\(int index\) const \{\n'
+              r'\tauto state = QAccessible::State\(\);\n'
+              r'\tstate\.selectable = true;\n'
+              r'\tstate\.focusable = true;\n)',
+              lambda m: m.group(1) + (
+                  '\tif (index == _a11yCurrentIndex) {\n'
+                  '\t\tstate.focused = true;\n'
+                  '\t\tstate.selected = true;\n'
+                  '\t\tstate.active = true;\n'
+                  '\t}\n'),
+              cpp,
+              count=1)
+          if n == 0:
+              print('WARNING: accessibilityChildState landmark not found '
+                    '— focused state will not be reported')
+
+          # Append the a11yProcessKey definition. Lives in the same
+          # translation unit as a11yRecomputeVisible() so the existing
+          # enumerateItems template instantiations stay reusable.
+          impl = (
+              '\n'
+              '// === Arrow-key a11y navigation (added by accessibility-patch) ===\n'
+              'bool HistoryInner::a11yProcessKey(QKeyEvent *e) {\n'
+              '\tif (!Ui::ScreenReaderModeActive()) {\n'
+              '\t\treturn false;\n'
+              '\t}\n'
+              '\tconst auto key = e->key();\n'
+              '\tconst auto isDown = (key == Qt::Key_Down);\n'
+              '\tconst auto isUp = (key == Qt::Key_Up);\n'
+              '\tconst auto isPageDown = (key == Qt::Key_PageDown);\n'
+              '\tconst auto isPageUp = (key == Qt::Key_PageUp);\n'
+              '\tconst auto isHome = (key == Qt::Key_Home);\n'
+              '\tconst auto isEnd = (key == Qt::Key_End);\n'
+              '\tif (!isDown && !isUp && !isPageDown && !isPageUp\n'
+              '\t\t\t&& !isHome && !isEnd) {\n'
+              '\t\treturn false;\n'
+              '\t}\n'
+              '\tif (e->modifiers()\n'
+              '\t\t& (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) {\n'
+              '\t\treturn false;\n'
+              '\t}\n'
+              '\ta11yRecomputeVisible();\n'
+              '\tconst int total = int(_a11yVisibleItems.size());\n'
+              '\tif (total <= 0) return false;\n'
+              '\tconst int prev = _a11yCurrentIndex;\n'
+              '\tint next = prev;\n'
+              '\tif (isHome) next = 0;\n'
+              '\telse if (isEnd) next = total - 1;\n'
+              '\telse if (isDown) next = (prev < 0) ? 0 : std::min(prev + 1, total - 1);\n'
+              '\telse if (isUp) next = (prev < 0) ? (total - 1) : std::max(prev - 1, 0);\n'
+              '\telse if (isPageDown) next = (prev < 0) ? 0 : std::min(prev + 5, total - 1);\n'
+              '\telse if (isPageUp) next = (prev < 0) ? (total - 1) : std::max(prev - 5, 0);\n'
+              '\t_a11yCurrentIndex = next;\n'
+              '\tif (prev != next) {\n'
+              '\t\taccessibilityChildFocused(next);\n'
+              '\t}\n'
+              '\treturn true;\n'
+              '}\n'
+          )
+
+          cpp = cpp.rstrip() + '\n' + impl
+          with open(cpp_path, 'w', encoding='utf-8') as f:
+              f.write(cpp)
+          print('history_inner_widget.cpp patched (a11y key)')
+
+      # ============================================
       # 8. Cache third-party libraries
       # ============================================
       - name: Generate cache key

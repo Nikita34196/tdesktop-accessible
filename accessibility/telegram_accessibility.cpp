@@ -1,6 +1,7 @@
 // telegram_accessibility.cpp
 // Accessibility layer for Telegram Desktop + NVDA/JAWS/Narrator
 #include "ui/accessibility/telegram_accessibility.h"
+#include "ui/accessibility/telegram_accessibility_keyboard.h"
 
 #include <QApplication>
 #include <QAbstractButton>
@@ -11,6 +12,7 @@
 #include <QScrollArea>
 #include <QToolTip>
 #include <QDebug>
+#include <QTimer>
 
 namespace TgAccessibility {
 
@@ -19,6 +21,14 @@ namespace TgAccessibility {
 // =====================================================================
 void Install() {
     QAccessible::installFactory(&Factory);
+
+    // Install the F6 / Shift+F6 / Ctrl+Tab / Escape keyboard navigation
+    // filter. Deferred until the event loop is running so that qApp and
+    // the main window are guaranteed to exist when we attach.
+    QTimer::singleShot(0, qApp, [] {
+        InstallKeyboardNavigation();
+    });
+
     qDebug() << "[TgAccessibility] Screen-reader accessibility layer installed.";
 }
 

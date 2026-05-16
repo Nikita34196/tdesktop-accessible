@@ -232,8 +232,17 @@ jobs:
         id: cache-libs
         uses: actions/cache@v4
         with:
-          path: Libraries
-          key: win-x64-libs-${{ env.CACHE_KEY }}
+          # ThirdParty must be cached too: prepare.py installs the
+          # bundled Python interpreter there (ThirdParty/python/Scripts/
+          # python), and tdesktop/CMakeLists.txt hard-codes that path
+          # as Python3_EXECUTABLE on Windows. Caching only Libraries
+          # makes a cache hit skip prepare.py and then CMake fails to
+          # find Python.
+          path: |
+            Libraries
+            ThirdParty
+          # v2 prefix busts the old Libraries-only cache.
+          key: win-x64-libs-v2-${{ env.CACHE_KEY }}
 
       # ============================================
       # 9. Prepare libraries (if not cached)

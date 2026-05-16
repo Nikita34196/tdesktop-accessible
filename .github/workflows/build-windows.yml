@@ -614,7 +614,20 @@ jobs:
               '}\n'
           )
 
-          cpp = cpp.rstrip() + '\n' + impl
+          # The whole file lives inside `namespace HistoryView::Controls { ... }`
+          # — appending past the closing brace puts the impl in the global
+          # namespace, where VoiceRecordBar isn't a name and none of its
+          # private methods resolve. Insert just before the namespace close.
+          cpp, n_impl = re.subn(
+              r'(\n}\s*//\s*namespace\s+HistoryView::Controls\s*\n?)\Z',
+              lambda m: '\n' + impl + m.group(1),
+              cpp,
+              count=1)
+          if n_impl == 0:
+              print('ERROR: namespace HistoryView::Controls close not found '
+                    'at end of file')
+              exit(1)
+
           with open(cpp_path, 'w', encoding='utf-8') as f:
               f.write(cpp)
           print('voice_record_bar.cpp patched')

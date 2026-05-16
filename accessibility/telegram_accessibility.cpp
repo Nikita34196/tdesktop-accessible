@@ -268,10 +268,13 @@ void Install() {
 
     // Log every transition so we can see in tg_widgets_log.txt whether
     // NVDA was detected at all (or detected late, after focusing chats).
-    // Static lifetime keeps the subscription alive for the process.
+    // The lib_rpl in tdesktop exposes the subscribe terminal as
+    // `rpl::on_next(handler, lifetime)` — `start_with_next` from newer rpl
+    // forks doesn't exist here. Static lifetime keeps it alive for the
+    // process.
     static rpl::lifetime kScreenReaderLifetime;
     Ui::ScreenReaderModeActiveValue(
-    ) | rpl::start_with_next([](bool active) {
+    ) | rpl::on_next([](bool active) {
         Log(QStringLiteral("[ScreenReader] active changed -> %1")
             .arg(active ? 1 : 0));
     }, kScreenReaderLifetime);

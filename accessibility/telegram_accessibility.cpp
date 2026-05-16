@@ -25,6 +25,7 @@
 // pre-existing screen-reader code light up. Our own factory becomes a
 // fallback for widgets lib_ui doesn't claim (accessibilityRole() == NoRole).
 #include "ui/accessible/ui_accessible_factory.h"
+#include "ui/screen_reader_mode.h"
 
 #include <QApplication>
 #include <QAbstractButton>
@@ -260,6 +261,20 @@ void Install() {
     Ui::Accessible::Init();
 
     Log(QStringLiteral("[TgAccessibility] Install() called"));
+    Log(QStringLiteral("[Init] Ui::Accessible::Init() done; "
+                       "ScreenReaderModeActive=%1, QAccessible::isActive=%2")
+        .arg(Ui::ScreenReaderModeActive() ? 1 : 0)
+        .arg(QAccessible::isActive() ? 1 : 0));
+
+    // Log every transition so we can see in tg_widgets_log.txt whether
+    // NVDA was detected at all (or detected late, after focusing chats).
+    // Static lifetime keeps the subscription alive for the process.
+    static rpl::lifetime kScreenReaderLifetime;
+    Ui::ScreenReaderModeActiveValue(
+    ) | rpl::start_with_next([](bool active) {
+        Log(QStringLiteral("[ScreenReader] active changed -> %1")
+            .arg(active ? 1 : 0));
+    }, kScreenReaderLifetime);
 
     // Defer keyboard nav until the event loop is up and qApp / main
     // window exist.

@@ -528,6 +528,98 @@ jobs:
           print('history_inner_widget.cpp patched (a11y key)')
 
       # ============================================
+      # 7d. Patch VoiceRecordBar for screen-reader voice recording.
+      #     The voice button is fundamentally hold-to-record: it watches
+      #     MouseButtonPress / Release with a 250 ms timer. A synthesized
+      #     click (what lib_ui's accessibilityDoAction does for buttons)
+      #     never starts the capture. We expose a Q_INVOKABLE method on
+      #     VoiceRecordBar that drives the state machine directly, then
+      #     bind it to Ctrl+Shift+R in our keyboard event filter.
+      # ============================================
+      - name: Patch VoiceRecordBar for accessibility
+        shell: python
+        run: |
+          import os, re
+
+          h_path = ('tdesktop/Telegram/SourceFiles/history/view/controls/'
+                    'history_view_voice_record_bar.h')
+          cpp_path = ('tdesktop/Telegram/SourceFiles/history/view/controls/'
+                      'history_view_voice_record_bar.cpp')
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skipping VoiceRecordBar patch')
+                  exit(0)
+
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'accessibilityToggleRecord' in h:
+              print('voice_record_bar.h already patched')
+          else:
+              # Q_INVOKABLE needs its own Q_OBJECT in the class — the one in
+              # Ui::RpWidget covers only base meta data. Inject right after
+              # the opening brace of the class.
+              h, n = re.subn(
+                  r'(class\s+VoiceRecordBar\s+final\s*:\s*'
+                  r'public\s+Ui::RpWidget\s*\{)',
+                  lambda m: m.group(1) + '\n\tQ_OBJECT\n',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: VoiceRecordBar class header landmark not found')
+                  exit(1)
+
+              # Add the Q_INVOKABLE declaration after startRecordingAndLock.
+              decl = '\n\tQ_INVOKABLE void accessibilityToggleRecord();\n'
+              h, n = re.subn(
+                  r'(void\s+startRecordingAndLock\s*\([^)]*\)\s*;)',
+                  lambda m: m.group(1) + decl,
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: startRecordingAndLock landmark not found in h')
+                  exit(1)
+
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('voice_record_bar.h patched')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'accessibilityToggleRecord' in cpp:
+              print('voice_record_bar.cpp already patched')
+              exit(0)
+
+          # State machine maps Ctrl+Shift+R (handled in our keyboard filter)
+          # onto whatever the user would normally do by pressing, dragging
+          # and releasing the send button:
+          #   not recording  -> startRecordingAndLock(false): record & enter
+          #                     locked mode (hands-free)
+          #   recording      -> stop(true): finalize & send
+          #   listening to a freshly recorded preview
+          #                  -> requestToSendWithOptions({}): send it
+          impl = (
+              '\n'
+              '// === Accessibility: single hotkey to start/send a voice ===\n'
+              'void VoiceRecordBar::accessibilityToggleRecord() {\n'
+              '\tif (isListenState()) {\n'
+              '\t\trequestToSendWithOptions({});\n'
+              '\t} else if (isActive()) {\n'
+              '\t\tstop(true);\n'
+              '\t} else {\n'
+              '\t\tstartRecordingAndLock(false);\n'
+              '\t}\n'
+              '}\n'
+          )
+
+          cpp = cpp.rstrip() + '\n' + impl
+          with open(cpp_path, 'w', encoding='utf-8') as f:
+              f.write(cpp)
+          print('voice_record_bar.cpp patched')
+
+      # ============================================
       # 8. Cache third-party libraries
       # ============================================
       - name: Generate cache key

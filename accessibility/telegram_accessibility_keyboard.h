@@ -60,6 +60,22 @@ inline QWidget *FindByType(QWidget *root, const char *fullName) {
     return nullptr;
 }
 
+// Same as FindByType but doesn't filter out invisible widgets. Some
+// widgets (like VoiceRecordBar) only become visible once we activate
+// them — we need a pointer before that happens.
+inline QWidget *FindByTypeAny(QWidget *root, const char *fullName) {
+    if (!root) return nullptr;
+    const QString target = QString::fromLatin1(fullName);
+    if (DynamicTypeName(root) == target) {
+        return root;
+    }
+    for (QWidget *w : root->findChildren<QWidget *>()) {
+        if (!w) continue;
+        if (DynamicTypeName(w) == target) return w;
+    }
+    return nullptr;
+}
+
 inline QWidget *FindMainWindow() {
     QWidget *best = nullptr;
     for (QWidget *w : QApplication::topLevelWidgets()) {
@@ -119,6 +135,34 @@ protected:
                     focusAndAnnounce(p.first, p.second);
                     return true;
                 }
+            }
+        }
+        // Ctrl+Shift+R — voice-record shortcut for screen reader users.
+        // VoiceRecordButton is fundamentally hold-to-record, so neither a
+        // synthesized click nor accessibilityDoAction("Press") starts the
+        // capture. Our patch on VoiceRecordBar exposes a Q_INVOKABLE
+        // accessibilityToggleRecord() that flips between
+        //   no recording -> startRecordingAndLock(false)
+        //   recording locked -> stop(true) (i.e. send)
+        //   listen state    -> requestToSendWithOptions({})
+        // so a single hotkey covers the whole flow.
+        if (key == Qt::Key_R
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                QWidget *vrb = detail::FindByTypeAny(
+                    root, "HistoryView::Controls::VoiceRecordBar");
+                if (vrb) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        vrb, "accessibilityToggleRecord",
+                        Qt::DirectConnection);
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+R -> VoiceRecordBar.accessibilityToggleRecord"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+                LogLine(QStringLiteral(
+                    "Ctrl+Shift+R -> VoiceRecordBar not found in main window"));
             }
         }
         return QObject::eventFilter(obj, event);

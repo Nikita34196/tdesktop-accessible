@@ -216,6 +216,152 @@ jobs:
           print('Patch complete')
 
       # ============================================
+      # 7b. Patch HistoryInner so screen readers can see individual messages.
+      #     Upstream Dialogs::InnerWidget already implements the
+      #     accessibilityChild*() hooks defined on Ui::RpWidget; HistoryInner
+      #     doesn't. We add the same set of overrides plus a tiny cache of
+      #     visible messages so lib_ui's Accessible::Widget wraps each
+      #     visible Element as a real QAccessibleInterface child.
+      # ============================================
+      - name: Patch HistoryInner for accessibility
+        shell: python
+        run: |
+          import os, re
+
+          h_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.h'
+          cpp_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.cpp'
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skipping HistoryInner patch')
+                  exit(0)
+
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'a11yRecomputeVisible' in h:
+              print('history_inner_widget.h already patched')
+          else:
+              # Inject override declarations right after `~HistoryInner();`.
+              h_methods = (
+                  '\n\n\t// === Accessibility for screen readers (NVDA / JAWS) ===\n'
+                  '\tQAccessible::Role accessibilityRole() override;\n'
+                  '\tQt::FocusPolicy accessibilityFocusPolicy() override;\n'
+                  '\tint accessibilityChildCount() const override;\n'
+                  '\tQString accessibilityChildName(int index) const override;\n'
+                  '\tQAccessible::State accessibilityChildState(int index) const override;\n'
+                  '\tQAccessible::Role accessibilityChildRole() const override;\n'
+                  '\tQRect accessibilityChildRect(int index) const override;\n'
+              )
+              h, n = re.subn(
+                  r'(~HistoryInner\s*\(\s*\)\s*;)',
+                  lambda m: m.group(1) + h_methods,
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: ~HistoryInner() landmark not found')
+                  exit(1)
+
+              # Inject the visible-items cache field as the last member of the
+              # class. `_overlayHost;` is unique inside HistoryInner.
+              h_field = (
+                  '\n\n\t// Cache of currently visible messages, refreshed on every\n'
+                  '\t// accessibilityChildCount() query. Used by the override block above.\n'
+                  '\tstruct A11yVisibleItem {\n'
+                  '\t\tHistoryView::Element *view = nullptr;\n'
+                  '\t\tQRect rect;\n'
+                  '\t};\n'
+                  '\tmutable std::vector<A11yVisibleItem> _a11yVisibleItems;\n'
+                  '\tvoid a11yRecomputeVisible();\n'
+              )
+              h, n = re.subn(
+                  r'(std::unique_ptr<HistoryView::ElementOverlayHost>\s+_overlayHost\s*;)',
+                  lambda m: m.group(1) + h_field,
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: _overlayHost landmark not found')
+                  exit(1)
+
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('history_inner_widget.h patched')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'a11yRecomputeVisible' in cpp:
+              print('history_inner_widget.cpp already patched')
+              exit(0)
+
+          # Definitions go at the end of the file. They live in the same
+          # translation unit as the `enumerateItems` template and its
+          # `enumerateItemsInHistory` companion, so template instantiation
+          # succeeds without exposing those templates in the header.
+          impl = (
+              '\n'
+              '// === Accessibility implementations (added by accessibility-patch) ===\n'
+              'void HistoryInner::a11yRecomputeVisible() {\n'
+              '\t_a11yVisibleItems.clear();\n'
+              '\tenumerateItems<EnumItemsDirection::TopToBottom>(\n'
+              '\t\t[&](not_null<Element*> view, int itemtop, int itembottom) {\n'
+              '\t\t\t_a11yVisibleItems.push_back({\n'
+              '\t\t\t\tview.get(),\n'
+              '\t\t\t\tQRect(0, itemtop, width(), itembottom - itemtop)\n'
+              '\t\t\t});\n'
+              '\t\t\treturn true;\n'
+              '\t\t});\n'
+              '}\n'
+              '\n'
+              'QAccessible::Role HistoryInner::accessibilityRole() {\n'
+              '\treturn QAccessible::List;\n'
+              '}\n'
+              '\n'
+              'Qt::FocusPolicy HistoryInner::accessibilityFocusPolicy() {\n'
+              '\treturn Qt::TabFocus;\n'
+              '}\n'
+              '\n'
+              'int HistoryInner::accessibilityChildCount() const {\n'
+              '\tconst_cast<HistoryInner*>(this)->a11yRecomputeVisible();\n'
+              '\treturn int(_a11yVisibleItems.size());\n'
+              '}\n'
+              '\n'
+              'QString HistoryInner::accessibilityChildName(int index) const {\n'
+              '\tif (index < 0 || index >= int(_a11yVisibleItems.size())) {\n'
+              '\t\treturn QString();\n'
+              '\t}\n'
+              '\tconst auto view = _a11yVisibleItems[index].view;\n'
+              '\tif (!view) {\n'
+              '\t\treturn QString();\n'
+              '\t}\n'
+              '\treturn view->data()->notificationText().text;\n'
+              '}\n'
+              '\n'
+              'QAccessible::State HistoryInner::accessibilityChildState(int index) const {\n'
+              '\tauto state = QAccessible::State();\n'
+              '\tstate.selectable = true;\n'
+              '\tstate.focusable = true;\n'
+              '\treturn state;\n'
+              '}\n'
+              '\n'
+              'QAccessible::Role HistoryInner::accessibilityChildRole() const {\n'
+              '\treturn QAccessible::ListItem;\n'
+              '}\n'
+              '\n'
+              'QRect HistoryInner::accessibilityChildRect(int index) const {\n'
+              '\tif (index < 0 || index >= int(_a11yVisibleItems.size())) {\n'
+              '\t\treturn QRect();\n'
+              '\t}\n'
+              '\treturn _a11yVisibleItems[index].rect;\n'
+              '}\n'
+          )
+
+          cpp = cpp.rstrip() + '\n' + impl
+          with open(cpp_path, 'w', encoding='utf-8') as f:
+              f.write(cpp)
+          print('history_inner_widget.cpp patched')
+
+      # ============================================
       # 8. Cache third-party libraries
       # ============================================
       - name: Generate cache key

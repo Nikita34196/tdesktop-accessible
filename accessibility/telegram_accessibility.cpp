@@ -16,6 +16,16 @@
 #include "ui/accessibility/telegram_accessibility.h"
 #include "ui/accessibility/telegram_accessibility_keyboard.h"
 
+// lib_ui already ships a full Ui::Accessible framework: a QAccessibleInterface
+// factory keyed on Ui::RpWidget plus virtual accessibilityChild*() hooks on
+// every RpWidget. Dialogs::InnerWidget overrides those hooks to expose each
+// chat as a real accessible child (with proper name, role, state, and Focus
+// events on Up/Down). That whole pipeline is dormant in upstream tdesktop
+// because nothing ever calls Ui::Accessible::Init(). We call it below so the
+// pre-existing screen-reader code light up. Our own factory becomes a
+// fallback for widgets lib_ui doesn't claim (accessibilityRole() == NoRole).
+#include "ui/accessible/ui_accessible_factory.h"
+
 #include <QApplication>
 #include <QAbstractButton>
 #include <QLineEdit>
@@ -241,7 +251,13 @@ void LogLine(const QString &msg) {
 // Install — call once from Application::init() or main()
 // =====================================================================
 void Install() {
+    // Order matters. Qt's QAccessible::installFactory pushes factories onto a
+    // list that is iterated in REVERSE order, so the factory installed last
+    // gets the first attempt at every widget. We want lib_ui's factory tried
+    // first because it knows how to expose Dialogs::InnerWidget's child rows
+    // properly; ours stays as the catch-all for widgets lib_ui doesn't claim.
     QAccessible::installFactory(&Factory);
+    Ui::Accessible::Init();
 
     Log(QStringLiteral("[TgAccessibility] Install() called"));
 

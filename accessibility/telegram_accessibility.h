@@ -17,6 +17,15 @@ void Install();
 // Factory: Qt calls this to get an accessible interface for any QObject
 QAccessibleInterface *Factory(const QString &classname, QObject *object);
 
+// Diagnostic: dump the full widget tree to <Desktop>/tg_widgets_log.txt.
+// Install() schedules this 10 seconds after startup; expose it so other
+// code (e.g. a debug hotkey) can request a dump on demand.
+void DumpWidgetTree();
+
+// Diagnostic: append a free-form line to the same log file. Safe to call
+// from any thread.
+void LogLine(const QString &msg);
+
 // ------------------------------------------------------------------
 // Generic accessible wrapper for any Telegram custom widget.
 // Reads accessibleName / accessibleDescription / toolTip / objectName

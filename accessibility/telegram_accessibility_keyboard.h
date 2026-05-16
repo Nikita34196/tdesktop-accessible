@@ -23,6 +23,8 @@
 #include <QLatin1String>
 #include <typeinfo>
 
+#include "ui/accessibility/telegram_accessibility.h"
+
 namespace TgAccessibility {
 namespace detail {
 
@@ -93,6 +95,15 @@ protected:
         const int key = ke->key();
         const auto mods = ke->modifiers();
 
+        // Ctrl+Shift+F6 — diagnostic: dump the widget tree now,
+        // so we don't have to wait for the 10s scheduled dump.
+        // Must be checked BEFORE the plain F6 case.
+        if (key == Qt::Key_F6
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            DumpWidgetTree();
+            return true;
+        }
         if (key == Qt::Key_F6) {
             cyclePanels(mods & Qt::ShiftModifier);
             return true;
@@ -120,6 +131,10 @@ private:
         const auto panels = discoverPanels();
         if (panels.isEmpty()) {
             qDebug() << "[TgAccessibility] F6: no panels discovered yet";
+            LogLine(QStringLiteral(
+                "F6 -> no panels discovered (typeid-based lookup "
+                "found no Dialogs::Widget / HistoryWidget / "
+                "Ui::InputField in the main window)"));
             return;
         }
 
@@ -196,8 +211,13 @@ private:
 
         QAccessibleEvent ev(w, QAccessible::Focus);
         QAccessible::updateAccessibility(&ev);
-        qDebug() << "[TgAccessibility] F6 ->" << name
-                 << "type=" << detail::DynamicTypeName(w);
+        const QString line = QStringLiteral(
+            "F6 -> name=\"%1\"  type=\"%2\"  className=\"%3\"")
+            .arg(name,
+                 detail::DynamicTypeName(w),
+                 QString::fromUtf8(w->metaObject()->className()));
+        qDebug().noquote() << "[TgAccessibility]" << line;
+        LogLine(line);
     }
 };
 

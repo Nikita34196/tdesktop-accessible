@@ -665,11 +665,37 @@ jobs:
               exit(0)
 
           # Match the original three-line body and replace with a richer
-          # event burst. Whitespace-tolerant; bails loud if upstream renamed.
+          # event burst plus diagnostic logging so we can confirm it ran.
+          # Bails loud if upstream renames the function.
           replacement = (
               'void RpWidget::accessibilityChildFocused(int index) {\n'
               '\t// a11y-extra-events: fire Focus + Selection + StateChange\n'
-              '\t// so NVDA actually announces the newly-focused list child.\n'
+              '\t// AND fire Focus directly on the child interface — the\n'
+              '\t// MSAA bridge in Qt has been observed to drop child-id\n'
+              '\t// focus events on lists where the parent keeps QWidget\n'
+              '\t// focus. Diagnostic line appended to <Desktop>/\n'
+              '\t// tg_a11y_diag.txt so we can confirm the call really fires.\n'
+              '\t{\n'
+              '\t\tstatic QFile diag;\n'
+              '\t\tif (!diag.isOpen()) {\n'
+              '\t\t\tconst auto dir = QStandardPaths::writableLocation(\n'
+              '\t\t\t\tQStandardPaths::DesktopLocation);\n'
+              '\t\t\tif (!dir.isEmpty()) {\n'
+              '\t\t\t\tdiag.setFileName(\n'
+              '\t\t\t\t\tdir + QStringLiteral("/tg_a11y_diag.txt"));\n'
+              '\t\t\t\tdiag.open(QIODevice::Append | QIODevice::Text);\n'
+              '\t\t\t}\n'
+              '\t\t}\n'
+              '\t\tif (diag.isOpen()) {\n'
+              '\t\t\tQTextStream(&diag)\n'
+              '\t\t\t\t<< "childFocused index=" << index\n'
+              '\t\t\t\t<< " on " << metaObject()->className()\n'
+              '\t\t\t\t<< " hasFocus=" << (hasFocus() ? 1 : 0)\n'
+              '\t\t\t\t<< "\\n";\n'
+              '\t\t\tdiag.flush();\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\n'
               '\tQAccessibleEvent focus(this, QAccessible::Focus);\n'
               '\tfocus.setChild(index);\n'
               '\tQAccessible::updateAccessibility(&focus);\n'
@@ -685,6 +711,14 @@ jobs:
               '\tQAccessibleStateChangeEvent stateChange(this, changedState);\n'
               '\tstateChange.setChild(index);\n'
               '\tQAccessible::updateAccessibility(&stateChange);\n'
+              '\n'
+              '\t// Fire Focus directly on the child interface too — this is\n'
+              '\t// how MSAA-aware screen readers find the focused descendant\n'
+              '\t// when the host widget retains QWidget focus.\n'
+              '\tif (auto child = accessibilityChildInterface(index)) {\n'
+              '\t\tQAccessibleEvent childFocus(child, QAccessible::Focus);\n'
+              '\t\tQAccessible::updateAccessibility(&childFocus);\n'
+              '\t}\n'
               '}'
           )
 
@@ -697,6 +731,25 @@ jobs:
               print('ERROR: accessibilityChildFocused body not found '
                     '(upstream lib_ui may have changed its shape)')
               exit(1)
+
+          # The diagnostic block uses QFile/QStandardPaths/QTextStream; the
+          # file already includes <QtGui/...> which doesn't pull these in
+          # reliably across Qt versions. Inject explicit includes once.
+          inc_block = (
+              '#include <QtCore/QFile>\n'
+              '#include <QtCore/QStandardPaths>\n'
+              '#include <QtCore/QTextStream>\n'
+          )
+          if '<QtCore/QFile>' not in src2:
+              src2, n_inc = re.subn(
+                  r'(#include\s+"ui/rp_widget\.h"\s*\n)',
+                  lambda m: m.group(1) + inc_block,
+                  src2,
+                  count=1)
+              if n_inc == 0:
+                  print('WARNING: own-header include not found; '
+                        'prepending diagnostic includes')
+                  src2 = inc_block + src2
 
           with open(cpp, 'w', encoding='utf-8') as f:
               f.write(src2)

@@ -137,6 +137,61 @@ protected:
                 }
             }
         }
+        // Diagnostic: log arrow keys when focus is on a list-like panel.
+        // Logs the focused widget's type, hasFocus state, and what its
+        // focusChild() interface returns (name/role). If focusChild
+        // returns the right child but NVDA is still silent, the breakage
+        // is in the Qt MSAA bridge or NVDA's filter. If it returns null
+        // or wrong, the breakage is upstream of the bridge.
+        if ((key == Qt::Key_Up
+                || key == Qt::Key_Down
+                || key == Qt::Key_PageUp
+                || key == Qt::Key_PageDown)
+            && !(mods & ~Qt::ShiftModifier)) {
+            QWidget *focused = QApplication::focusWidget();
+            if (focused) {
+                const auto type = detail::DynamicTypeName(focused);
+                if (type == QLatin1String("Dialogs::InnerWidget")
+                    || type == QLatin1String("HistoryInner")) {
+                    // Let the keypress run normally first, then read state.
+                    QPointer<QWidget> alive(focused);
+                    const QString keyName = (key == Qt::Key_Up) ? "Up"
+                        : (key == Qt::Key_Down) ? "Down"
+                        : (key == Qt::Key_PageUp) ? "PageUp"
+                        : "PageDown";
+                    QTimer::singleShot(0, [alive, keyName, type] {
+                        if (!alive) {
+                            LogLine(QStringLiteral(
+                                "Arrow %1 on %2 -> widget gone")
+                                .arg(keyName, type));
+                            return;
+                        }
+                        QString summary = QStringLiteral(
+                            "Arrow %1 on %2 hasFocus=%3 isVisible=%4")
+                            .arg(keyName, type)
+                            .arg(alive->hasFocus() ? 1 : 0)
+                            .arg(alive->isVisible() ? 1 : 0);
+                        if (auto *iface = QAccessible::queryAccessibleInterface(
+                                alive.data())) {
+                            summary += QStringLiteral(
+                                " childCount=%1").arg(iface->childCount());
+                            if (auto *child = iface->focusChild()) {
+                                summary += QStringLiteral(
+                                    " focusChild.name=\"%1\" role=%2")
+                                    .arg(child->text(QAccessible::Name))
+                                    .arg(int(child->role()));
+                            } else {
+                                summary += QStringLiteral(
+                                    " focusChild=nullptr");
+                            }
+                        } else {
+                            summary += QStringLiteral(" iface=nullptr");
+                        }
+                        LogLine(summary);
+                    });
+                }
+            }
+        }
         // Ctrl+Shift+R — voice-record shortcut for screen reader users.
         // VoiceRecordButton is fundamentally hold-to-record, so neither a
         // synthesized click nor accessibilityDoAction("Press") starts the

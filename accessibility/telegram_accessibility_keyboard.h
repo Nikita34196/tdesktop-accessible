@@ -20,6 +20,7 @@
 #include <QList>
 #include <QPair>
 #include <QPointer>
+#include <QTimer>
 #include <QLatin1String>
 #include <typeinfo>
 

@@ -633,6 +633,76 @@ jobs:
           print('voice_record_bar.cpp patched')
 
       # ============================================
+      # 7e. Patch lib_ui RpWidget::accessibilityChildFocused so NVDA actually
+      #     announces the newly-focused list item.
+      #
+      #     Upstream fires a single `QAccessibleEvent(this, Focus)` with
+      #     setChild(index). Through Qt's Windows MSAA bridge this becomes
+      #     EVENT_OBJECT_FOCUS, but NVDA empirically only re-reads list-item
+      #     selection when it also sees EVENT_OBJECT_SELECTION /
+      #     EVENT_OBJECT_STATECHANGE on the child. Visible state in
+      #     Dialogs::InnerWidget correctly flips selected/focused/active,
+      #     but without those extra events NVDA never knows to query and
+      #     speak the child — which exactly matches the reported symptom:
+      #     "cursor moves through chats but NVDA stays silent, only the
+      #     screen-review cursor reads them".
+      # ============================================
+      - name: Patch lib_ui RpWidget for NVDA child-focus events
+        shell: python
+        run: |
+          import os, re
+
+          cpp = 'tdesktop/Telegram/lib_ui/ui/rp_widget.cpp'
+          if not os.path.exists(cpp):
+              print(f'WARNING: missing {cpp} — skipping rp_widget patch')
+              exit(0)
+
+          with open(cpp, 'r', encoding='utf-8') as f:
+              src = f.read()
+
+          if 'a11y-extra-events' in src:
+              print('rp_widget.cpp already patched')
+              exit(0)
+
+          # Match the original three-line body and replace with a richer
+          # event burst. Whitespace-tolerant; bails loud if upstream renamed.
+          replacement = (
+              'void RpWidget::accessibilityChildFocused(int index) {\n'
+              '\t// a11y-extra-events: fire Focus + Selection + StateChange\n'
+              '\t// so NVDA actually announces the newly-focused list child.\n'
+              '\tQAccessibleEvent focus(this, QAccessible::Focus);\n'
+              '\tfocus.setChild(index);\n'
+              '\tQAccessible::updateAccessibility(&focus);\n'
+              '\n'
+              '\tQAccessibleEvent selection(this, QAccessible::Selection);\n'
+              '\tselection.setChild(index);\n'
+              '\tQAccessible::updateAccessibility(&selection);\n'
+              '\n'
+              '\tauto changedState = QAccessible::State();\n'
+              '\tchangedState.focused = true;\n'
+              '\tchangedState.selected = true;\n'
+              '\tchangedState.active = true;\n'
+              '\tQAccessibleStateChangeEvent stateChange(this, changedState);\n'
+              '\tstateChange.setChild(index);\n'
+              '\tQAccessible::updateAccessibility(&stateChange);\n'
+              '}'
+          )
+
+          pattern = (
+              r'void\s+RpWidget::accessibilityChildFocused\s*\(\s*int\s+index\s*\)'
+              r'\s*\{[^}]*\}'
+          )
+          src2, n = re.subn(pattern, replacement, src, count=1)
+          if n == 0:
+              print('ERROR: accessibilityChildFocused body not found '
+                    '(upstream lib_ui may have changed its shape)')
+              exit(1)
+
+          with open(cpp, 'w', encoding='utf-8') as f:
+              f.write(src2)
+          print('lib_ui rp_widget.cpp patched (extra a11y events)')
+
+      # ============================================
       # 8. Cache third-party libraries
       # ============================================
       - name: Generate cache key

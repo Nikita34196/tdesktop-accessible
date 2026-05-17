@@ -691,7 +691,7 @@ jobs:
               '\t\t\t\t<< "childFocused index=" << index\n'
               '\t\t\t\t<< " on " << metaObject()->className()\n'
               '\t\t\t\t<< " hasFocus=" << (hasFocus() ? 1 : 0)\n'
-              '\t\t\t\t<< "\\n";\n'
+              '\t\t\t\t<< Qt::endl;\n'
               '\t\t\tdiag.flush();\n'
               '\t\t}\n'
               '\t}\n'

@@ -24,9 +24,114 @@
 #include <QLatin1String>
 #include <typeinfo>
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <string>
+#endif
+
 #include "ui/accessibility/telegram_accessibility.h"
 
 namespace TgAccessibility {
+
+// =====================================================================
+// NVDA Controller Client integration.
+//
+// Qt's MSAA bridge fires Focus / Selection / StateChange events on the
+// list parent with a child id when arrow keys move selection — and per
+// our tg_a11y_diag.txt those events DO fire (focusChild returns the
+// right ListItem with the chat name baked in). But NVDA still doesn't
+// speak the new row, presumably because the underlying Win32 focus
+// stays on the parent HWND and NVDA filters that as "no real focus
+// change".
+//
+// nvdaControllerClient.dll is NVDA's documented IPC entrypoint: any
+// process can LoadLibrary it and call nvdaController_speakText to make
+// NVDA speak arbitrary text immediately, bypassing the entire MSAA
+// path. Distributed inside the NVDA install; we just search the common
+// install locations. If the DLL isn't found (NVDA not installed, or
+// at an unusual path) this falls back to silence — the user still has
+// the on-screen highlight to follow visually.
+// =====================================================================
+namespace nvda {
+
+#ifdef Q_OS_WIN
+
+using SpeakTextFn = long(__stdcall *)(const wchar_t *);
+using CancelSpeechFn = long(__stdcall *)();
+
+inline SpeakTextFn &SpeakPtr() { static SpeakTextFn p = nullptr; return p; }
+inline CancelSpeechFn &CancelPtr() {
+    static CancelSpeechFn p = nullptr;
+    return p;
+}
+
+inline void EnsureLoaded() {
+    static bool tried = false;
+    if (tried) return;
+    tried = true;
+
+    HMODULE dll = LoadLibraryW(L"nvdaControllerClient64.dll");
+    if (!dll) {
+        dll = LoadLibraryW(L"nvdaControllerClient32.dll");
+    }
+    if (!dll) {
+        // Default x64 NVDA install.
+        wchar_t buf[MAX_PATH] = {};
+        if (GetEnvironmentVariableW(L"ProgramFiles(x86)", buf, MAX_PATH)) {
+            std::wstring p = std::wstring(buf)
+                + L"\\NVDA\\nvdaControllerClient64.dll";
+            dll = LoadLibraryW(p.c_str());
+        }
+    }
+    if (!dll) {
+        // Per-user NVDA install.
+        wchar_t buf[MAX_PATH] = {};
+        if (GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH)) {
+            std::wstring p = std::wstring(buf)
+                + L"\\Programs\\NVDA\\nvdaControllerClient64.dll";
+            dll = LoadLibraryW(p.c_str());
+        }
+    }
+
+    if (dll) {
+        SpeakPtr() = reinterpret_cast<SpeakTextFn>(
+            GetProcAddress(dll, "nvdaController_speakText"));
+        CancelPtr() = reinterpret_cast<CancelSpeechFn>(
+            GetProcAddress(dll, "nvdaController_cancelSpeech"));
+        LogLine(QStringLiteral(
+            "[nvda] controller client loaded; "
+            "speak=%1 cancel=%2")
+            .arg(SpeakPtr() ? 1 : 0)
+            .arg(CancelPtr() ? 1 : 0));
+    } else {
+        LogLine(QStringLiteral(
+            "[nvda] controller client DLL not found in "
+            "%PATH%, ProgramFiles(x86)\\NVDA, "
+            "LOCALAPPDATA\\Programs\\NVDA"));
+    }
+}
+
+inline void Speak(const QString &text) {
+    EnsureLoaded();
+    if (text.isEmpty()) return;
+    // Cancel any in-flight speech first so rapid Up/Down arrows don't
+    // pile up a long queue we'd have to wait through.
+    if (auto cancel = CancelPtr()) {
+        cancel();
+    }
+    if (auto speak = SpeakPtr()) {
+        speak(reinterpret_cast<const wchar_t *>(text.utf16()));
+    }
+}
+
+#else // Q_OS_WIN
+
+inline void Speak(const QString &) {}
+
+#endif // Q_OS_WIN
+
+} // namespace nvda
+
 namespace detail {
 
 // Returns the demangled, namespace-qualified C++ type name of *o.
@@ -177,10 +282,20 @@ protected:
                             summary += QStringLiteral(
                                 " childCount=%1").arg(iface->childCount());
                             if (auto *child = iface->focusChild()) {
+                                const auto name = child->text(
+                                    QAccessible::Name);
                                 summary += QStringLiteral(
                                     " focusChild.name=\"%1\" role=%2")
-                                    .arg(child->text(QAccessible::Name))
+                                    .arg(name)
                                     .arg(int(child->role()));
+                                // The MSAA child-id path doesn't make
+                                // NVDA speak even though everything is
+                                // wired up correctly (confirmed via
+                                // tg_a11y_diag.txt). Speak the row name
+                                // directly through NVDA Controller
+                                // Client — the documented IPC channel —
+                                // so the user actually hears it.
+                                nvda::Speak(name);
                             } else {
                                 summary += QStringLiteral(
                                     " focusChild=nullptr");

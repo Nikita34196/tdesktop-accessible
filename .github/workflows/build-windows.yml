@@ -21,6 +21,14 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
 
+    # softprops/action-gh-release needs write access on `contents` to create
+    # the Release and upload Telegram.exe. The default GITHUB_TOKEN is
+    # read-only for forks / private orgs unless we grant it explicitly,
+    # which is why the v1.0.0 attempt failed with
+    # "Resource not accessible by integration".
+    permissions:
+      contents: write
+
     env:
       REPO_NAME: tdesktop
 

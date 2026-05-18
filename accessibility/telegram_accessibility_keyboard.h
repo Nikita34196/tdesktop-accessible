@@ -27,7 +27,9 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <tlhelp32.h>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #endif
 
 #include "ui/accessibility/telegram_accessibility.h"
@@ -130,12 +132,53 @@ inline void EnsureLoaded() {
 
     HMODULE dll = tryLoad(QStringLiteral("default search path"), L"");
 
+    // Walk a directory tree looking for nvdaControllerClient64.dll. NVDA
+    // installs the controller-client DLLs in a subfolder (`controllerClient`
+    // on modern versions) — depth-first beats hardcoding sub-paths because
+    // NVDA has shipped them under different layouts over the years.
+    auto findInTree = [](const std::wstring &root) -> std::wstring {
+        if (root.empty()) return {};
+        std::error_code ec;
+        if (!std::filesystem::exists(root, ec) || ec) return {};
+        const auto opts =
+            std::filesystem::directory_options::skip_permission_denied;
+        for (auto it = std::filesystem::recursive_directory_iterator(
+                root, opts, ec);
+            !ec && it != std::filesystem::recursive_directory_iterator{};
+            it.increment(ec)) {
+            if (ec) { ec.clear(); continue; }
+            std::error_code statEc;
+            if (!it->is_regular_file(statEc) || statEc) continue;
+            const auto name = it->path().filename().wstring();
+            if (_wcsicmp(name.c_str(),
+                    L"nvdaControllerClient64.dll") == 0) {
+                return it->path().wstring();
+            }
+        }
+        return {};
+    };
+
     if (!dll) {
         if (auto running = FindRunningNvdaDir(); !running.empty()) {
+            // Try the install root first, then walk the whole tree.
             dll = tryLoad(
                 QStringLiteral("running nvda.exe dir (%1)")
                     .arg(QString::fromStdWString(running)),
                 running + L"\\nvdaControllerClient64.dll");
+            if (!dll) {
+                if (auto found = findInTree(running); !found.empty()) {
+                    dll = tryLoad(
+                        QStringLiteral("recursive in %1 (found %2)")
+                            .arg(QString::fromStdWString(running))
+                            .arg(QString::fromStdWString(found)),
+                        found);
+                } else {
+                    LogLine(QStringLiteral(
+                        "[nvda] recursive scan of %1 didn't find "
+                        "nvdaControllerClient64.dll")
+                        .arg(QString::fromStdWString(running)));
+                }
+            }
         } else {
             LogLine(QStringLiteral(
                 "[nvda] no nvda.exe found in running processes"));

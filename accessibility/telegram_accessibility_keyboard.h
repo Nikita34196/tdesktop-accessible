@@ -26,6 +26,7 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <tlhelp32.h>
 #include <string>
 #endif
 
@@ -65,31 +66,129 @@ inline CancelSpeechFn &CancelPtr() {
     return p;
 }
 
+// Walk the running process list and return the directory of nvda.exe
+// (or an empty string if it isn't running). This is the most reliable
+// way to find the NVDA install — works for default installs, portable
+// installs, custom paths, anything where the user has actually launched
+// NVDA. The companion DLL ships in the same directory.
+inline std::wstring FindRunningNvdaDir() {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+
+    PROCESSENTRY32W entry = {};
+    entry.dwSize = sizeof(entry);
+    std::wstring result;
+
+    if (Process32FirstW(snap, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExeFile, L"nvda.exe") != 0) {
+                continue;
+            }
+            HANDLE proc = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                FALSE,
+                entry.th32ProcessID);
+            if (!proc) {
+                continue;
+            }
+            wchar_t buf[MAX_PATH] = {};
+            DWORD len = MAX_PATH;
+            if (QueryFullProcessImageNameW(proc, 0, buf, &len)) {
+                std::wstring path(buf, len);
+                const auto slash = path.find_last_of(L"\\/");
+                if (slash != std::wstring::npos) {
+                    result = path.substr(0, slash);
+                }
+            }
+            CloseHandle(proc);
+            if (!result.empty()) {
+                break;
+            }
+        } while (Process32NextW(snap, &entry));
+    }
+    CloseHandle(snap);
+    return result;
+}
+
 inline void EnsureLoaded() {
     static bool tried = false;
     if (tried) return;
     tried = true;
 
-    HMODULE dll = LoadLibraryW(L"nvdaControllerClient64.dll");
+    // Each entry is logged so we know exactly what got tried.
+    auto tryLoad = [](const QString &label, const std::wstring &path) -> HMODULE {
+        HMODULE m = path.empty()
+            ? LoadLibraryW(L"nvdaControllerClient64.dll")
+            : LoadLibraryW(path.c_str());
+        LogLine(QStringLiteral("[nvda] try %1 -> %2")
+            .arg(label,
+                 m ? QStringLiteral("loaded") : QStringLiteral("not found")));
+        return m;
+    };
+
+    HMODULE dll = tryLoad(QStringLiteral("default search path"), L"");
+
     if (!dll) {
-        dll = LoadLibraryW(L"nvdaControllerClient32.dll");
+        if (auto running = FindRunningNvdaDir(); !running.empty()) {
+            dll = tryLoad(
+                QStringLiteral("running nvda.exe dir (%1)")
+                    .arg(QString::fromStdWString(running)),
+                running + L"\\nvdaControllerClient64.dll");
+        } else {
+            LogLine(QStringLiteral(
+                "[nvda] no nvda.exe found in running processes"));
+        }
     }
-    if (!dll) {
-        // Default x64 NVDA install.
+
+    auto envDir = [](const wchar_t *var) -> std::wstring {
         wchar_t buf[MAX_PATH] = {};
-        if (GetEnvironmentVariableW(L"ProgramFiles(x86)", buf, MAX_PATH)) {
-            std::wstring p = std::wstring(buf)
-                + L"\\NVDA\\nvdaControllerClient64.dll";
-            dll = LoadLibraryW(p.c_str());
+        if (GetEnvironmentVariableW(var, buf, MAX_PATH)) {
+            return std::wstring(buf);
+        }
+        return {};
+    };
+
+    if (!dll) {
+        const auto pf64 = envDir(L"ProgramW6432");
+        if (!pf64.empty()) {
+            dll = tryLoad(
+                QStringLiteral("ProgramW6432\\NVDA"),
+                pf64 + L"\\NVDA\\nvdaControllerClient64.dll");
         }
     }
     if (!dll) {
-        // Per-user NVDA install.
-        wchar_t buf[MAX_PATH] = {};
-        if (GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH)) {
-            std::wstring p = std::wstring(buf)
-                + L"\\Programs\\NVDA\\nvdaControllerClient64.dll";
-            dll = LoadLibraryW(p.c_str());
+        const auto pf = envDir(L"ProgramFiles");
+        if (!pf.empty()) {
+            dll = tryLoad(
+                QStringLiteral("ProgramFiles\\NVDA"),
+                pf + L"\\NVDA\\nvdaControllerClient64.dll");
+        }
+    }
+    if (!dll) {
+        const auto pfx86 = envDir(L"ProgramFiles(x86)");
+        if (!pfx86.empty()) {
+            dll = tryLoad(
+                QStringLiteral("ProgramFiles(x86)\\NVDA"),
+                pfx86 + L"\\NVDA\\nvdaControllerClient64.dll");
+        }
+    }
+    if (!dll) {
+        const auto local = envDir(L"LOCALAPPDATA");
+        if (!local.empty()) {
+            dll = tryLoad(
+                QStringLiteral("LOCALAPPDATA\\Programs\\NVDA"),
+                local + L"\\Programs\\NVDA\\nvdaControllerClient64.dll");
+        }
+    }
+    if (!dll) {
+        const auto roaming = envDir(L"APPDATA");
+        if (!roaming.empty()) {
+            // Common portable / per-user install spot.
+            dll = tryLoad(
+                QStringLiteral("APPDATA\\nvda"),
+                roaming + L"\\nvda\\nvdaControllerClient64.dll");
         }
     }
 
@@ -99,15 +198,13 @@ inline void EnsureLoaded() {
         CancelPtr() = reinterpret_cast<CancelSpeechFn>(
             GetProcAddress(dll, "nvdaController_cancelSpeech"));
         LogLine(QStringLiteral(
-            "[nvda] controller client loaded; "
-            "speak=%1 cancel=%2")
+            "[nvda] controller client loaded; speak=%1 cancel=%2")
             .arg(SpeakPtr() ? 1 : 0)
             .arg(CancelPtr() ? 1 : 0));
     } else {
         LogLine(QStringLiteral(
-            "[nvda] controller client DLL not found in "
-            "%PATH%, ProgramFiles(x86)\\NVDA, "
-            "LOCALAPPDATA\\Programs\\NVDA"));
+            "[nvda] controller client DLL not found anywhere; "
+            "speech-via-controller disabled"));
     }
 }
 

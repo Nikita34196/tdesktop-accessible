@@ -883,14 +883,25 @@ jobs:
         shell: bash
         run: |
           set -e
-          # Pinned release of NVDA's official controllerClient package.
-          # MIT-licensed redistributable per
-          # https://github.com/nvaccess/nvda/blob/master/extras/controllerClient/readme.md
-          URL='https://github.com/nvaccess/nvda/releases/download/release-2024.4.2/nvda_2024.4.2_controllerClient.zip'
-          curl -L --fail --silent --show-error -o cc.zip "$URL"
+          # NVDA ships the controllerClient ZIP from their own CDN (not from
+          # GitHub releases — those only contain the installer .exe). The
+          # directory index at https://download.nvaccess.org/releases/stable/
+          # lists `nvda_<VERSION>_controllerClient.zip` for the current
+          # stable release. We scrape that name so we don't have to bump a
+          # pinned URL on every NVDA release.
+          BASE='https://download.nvaccess.org/releases/stable'
+          ZIPNAME=$(curl -sL "$BASE/" \
+            | grep -oE 'nvda_[0-9.]+_controllerClient\.zip' \
+            | head -n 1)
+          if [ -z "$ZIPNAME" ]; then
+            echo "ERROR: couldn't find controllerClient zip in NVDA index"
+            exit 1
+          fi
+          echo "Downloading $BASE/$ZIPNAME"
+          curl -L --fail --silent --show-error -o cc.zip "$BASE/$ZIPNAME"
           mkdir -p cc-extract
           unzip -q cc.zip -d cc-extract
-          # Layout inside the ZIP: x86/ x64/ arm64/ headers/ readme.md
+          # Layout: x86/ x64/ arm64/ headers/ examples/ license.txt readme.md
           DLL=$(find cc-extract -iname 'nvdaControllerClient64.dll' | head -n 1)
           if [ -z "$DLL" ]; then
             echo "ERROR: nvdaControllerClient64.dll not found in NVDA archive"
@@ -898,6 +909,12 @@ jobs:
             exit 1
           fi
           cp "$DLL" artifact/nvdaControllerClient64.dll
+          # Carry the license file too — it's freely redistributable but the
+          # license requires attribution.
+          LIC=$(find cc-extract -iname 'license.txt' | head -n 1)
+          if [ -n "$LIC" ]; then
+            cp "$LIC" artifact/nvdaControllerClient-license.txt
+          fi
           echo "Bundled: $(du -h artifact/nvdaControllerClient64.dll | cut -f1)"
 
       - name: Upload artifact

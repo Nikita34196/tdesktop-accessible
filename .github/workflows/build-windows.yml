@@ -872,11 +872,95 @@ jobs:
 
           echo "Telegram.exe found, size: $(du -h artifact/Telegram.exe | cut -f1)"
 
+      # Bundle nvdaControllerClient64.dll alongside Telegram.exe. Without it
+      # the user log shows the recursive scan of C:\Program Files\NVDA failing
+      # to find the DLL — turns out many NVDA installs ship without the
+      # controller-client component. With the DLL placed next to our .exe,
+      # Windows finds it on LoadLibraryW("nvdaControllerClient64.dll") via
+      # the default search order (process's own directory comes first), so
+      # our existing nvda::Speak() implementation lights up automatically.
+      - name: Bundle nvdaControllerClient64.dll
+        shell: bash
+        run: |
+          set -e
+          # Pinned release of NVDA's official controllerClient package.
+          # MIT-licensed redistributable per
+          # https://github.com/nvaccess/nvda/blob/master/extras/controllerClient/readme.md
+          URL='https://github.com/nvaccess/nvda/releases/download/release-2024.4.2/nvda_2024.4.2_controllerClient.zip'
+          curl -L --fail --silent --show-error -o cc.zip "$URL"
+          mkdir -p cc-extract
+          unzip -q cc.zip -d cc-extract
+          # Layout inside the ZIP: x86/ x64/ arm64/ headers/ readme.md
+          DLL=$(find cc-extract -iname 'nvdaControllerClient64.dll' | head -n 1)
+          if [ -z "$DLL" ]; then
+            echo "ERROR: nvdaControllerClient64.dll not found in NVDA archive"
+            find cc-extract -type f | head -20
+            exit 1
+          fi
+          cp "$DLL" artifact/nvdaControllerClient64.dll
+          echo "Bundled: $(du -h artifact/nvdaControllerClient64.dll | cut -f1)"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Telegram-Accessible-Win64
           path: artifact/
+          retention-days: 90
+
+      # ============================================
+      # 12b. Build a Windows installer alongside the portable .exe so users
+      #      can pick whichever they prefer in the Release. Uses Inno Setup
+      #      (ships with windows-latest runners via chocolatey).
+      # ============================================
+      - name: Install Inno Setup
+        shell: cmd
+        run: choco install -y --no-progress innosetup
+
+      - name: Build installer
+        shell: cmd
+        run: |
+          mkdir installer
+          echo [Setup] > setup.iss
+          echo AppName=Telegram Desktop Accessible >> setup.iss
+          echo AppVersion=${{ env.TDESKTOP_VERSION }}-accessible >> setup.iss
+          echo AppPublisher=tdesktop-accessible >> setup.iss
+          echo AppPublisherURL=https://github.com/Nikita34196/tdesktop-accessible >> setup.iss
+          echo DefaultDirName={autopf}\TelegramAccessible >> setup.iss
+          echo DefaultGroupName=Telegram Accessible >> setup.iss
+          echo OutputDir=installer >> setup.iss
+          echo OutputBaseFilename=Telegram-Accessible-Setup >> setup.iss
+          echo Compression=lzma2 >> setup.iss
+          echo SolidCompression=yes >> setup.iss
+          echo ArchitecturesInstallIn64BitMode=x64 >> setup.iss
+          echo ArchitecturesAllowed=x64 >> setup.iss
+          echo PrivilegesRequired=lowest >> setup.iss
+          echo PrivilegesRequiredOverridesAllowed=dialog >> setup.iss
+          echo UninstallDisplayName=Telegram Desktop Accessible >> setup.iss
+          echo. >> setup.iss
+          echo [Files] >> setup.iss
+          echo Source: "artifact\Telegram.exe"; DestDir: "{app}"; Flags: ignoreversion >> setup.iss
+          echo Source: "artifact\nvdaControllerClient64.dll"; DestDir: "{app}"; Flags: ignoreversion >> setup.iss
+          echo Source: "artifact\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist recursesubdirs >> setup.iss
+          echo. >> setup.iss
+          echo [Icons] >> setup.iss
+          echo Name: "{group}\Telegram Accessible"; Filename: "{app}\Telegram.exe" >> setup.iss
+          echo Name: "{group}\Uninstall Telegram Accessible"; Filename: "{uninstallexe}" >> setup.iss
+          echo Name: "{autodesktop}\Telegram Accessible"; Filename: "{app}\Telegram.exe"; Tasks: desktopicon >> setup.iss
+          echo. >> setup.iss
+          echo [Tasks] >> setup.iss
+          echo Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; GroupDescription: "Дополнительно:"; Flags: unchecked >> setup.iss
+          echo. >> setup.iss
+          echo [Run] >> setup.iss
+          echo Filename: "{app}\Telegram.exe"; Description: "Запустить Telegram Accessible"; Flags: nowait postinstall skipifsilent >> setup.iss
+          type setup.iss
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+          dir installer
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telegram-Accessible-Setup
+          path: installer/Telegram-Accessible-Setup.exe
           retention-days: 90
 
       # ============================================
@@ -886,21 +970,31 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: artifact/Telegram.exe
+          files: |
+            artifact/Telegram.exe
+            artifact/nvdaControllerClient64.dll
+            installer/Telegram-Accessible-Setup.exe
           body: |
             ## Telegram Desktop Accessible ${{ github.ref_name }}
 
             Сборка на основе Telegram Desktop ${{ env.TDESKTOP_VERSION }}
             с поддержкой скринридеров (NVDA, JAWS, Narrator).
 
-            ### Установка
-            1. Скачайте `Telegram.exe`
-            2. Запустите
-            3. Включите NVDA
+            ### Что выбрать
+            - **`Telegram-Accessible-Setup.exe`** — установщик с ярлыками
+              в меню «Пуск» и (опционально) на рабочем столе. Рекомендуется.
+            - **`Telegram.exe` + `nvdaControllerClient64.dll`** — портативный
+              вариант. Скачайте оба файла в одну папку и запустите .exe.
 
             ### Горячие клавиши
-            - **F6** — переключение между панелями
-            - **Escape** — возврат в список чатов
+            - **F6 / Shift+F6** — переключение между панелями
+              (Чаты ↔ Сообщения ↔ Поле ввода)
+            - **Стрелки вверх/вниз** — навигация по списку чатов и
+              сообщениям (NVDA / экранный диктор Windows)
+            - **Ctrl+Shift+R** — записать / отправить голосовое сообщение
+            - **Escape** — вернуться в список чатов
+            - **Ctrl+Shift+F6** — диагностический дамп дерева виджетов
+              (для отчётов о проблемах)
 
             > Собрано на базе tdesktop@${{ env.SHORT_SHA }}
         env:

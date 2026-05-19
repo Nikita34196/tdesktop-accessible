@@ -829,6 +829,57 @@ jobs:
           python Telegram\build\prepare\prepare.py
 
       # ============================================
+      # 9b. Free disk space on the runner.
+      #
+      # Telegram + Qt + all the bundled libraries produce ~25-30 GB of
+      # intermediate .obj / .pdb / .pch files. windows-latest images have
+      # ~14 GB free out of the box, so the link step eventually trips
+      #   error C1090: PDB API call failed, error code '12'
+      # which is MSVC's polite phrasing for "ran out of disk during PDB
+      # generation". (Reproduced in builds 69732383083 / 69732394719,
+      # both died at link time after ~3.5h of compile work.)
+      #
+      # Strip the pre-installed SDKs/toolchains we don't need to reclaim
+      # ~30 GB before the build. This is the standard fix and is what
+      # other Telegram-derived workflows do.
+      # ============================================
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          Write-Host "Before cleanup:"
+          Get-PSDrive C | Select-Object Used,Free | Format-List
+          $paths = @(
+            'C:\Android',
+            'C:\Program Files (x86)\Android',
+            'C:\Program Files\Android',
+            'C:\ghcup',
+            'C:\hostedtoolcache\windows\go',
+            'C:\hostedtoolcache\windows\Ruby',
+            'C:\hostedtoolcache\windows\PyPy',
+            'C:\hostedtoolcache\windows\Java_Temurin-Hotspot_jdk',
+            'C:\Program Files\Java',
+            'C:\Program Files\MongoDB',
+            'C:\Program Files\MySQL',
+            'C:\Program Files\PostgreSQL',
+            'C:\Program Files (x86)\Microsoft SQL Server',
+            'C:\Program Files\Microsoft SQL Server',
+            'C:\Program Files (x86)\WiX Toolset v3.14',
+            'C:\Program Files\dotnet',
+            'C:\Program Files (x86)\dotnet',
+            'C:\SeleniumWebDrivers',
+            'C:\tools\php',
+            'C:\Strawberry'
+          )
+          foreach ($p in $paths) {
+            if (Test-Path $p) {
+              Write-Host "Removing $p ..."
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $p
+            }
+          }
+          Write-Host "After cleanup:"
+          Get-PSDrive C | Select-Object Used,Free | Format-List
+
+      # ============================================
       # 10. Configure
       # ============================================
       - name: Configure

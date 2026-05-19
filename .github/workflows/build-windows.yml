@@ -248,6 +248,20 @@ jobs:
           with open(h_path, 'r', encoding='utf-8') as f:
               h = f.read()
 
+          # Upstream tdesktop (post-87ee04c, dev branch) added its own
+          # accessibilityChildCount / Name / State / Role / Rect overrides
+          # plus full keyPressEvent navigation tracking
+          # _accessibilityFocusedItem / _accessibilityFocusedIndex. Our
+          # patch would duplicate every definition (C2084 "function already
+          # has a body" — exactly the build failure observed). Detect the
+          # upstream override and bail out entirely; lib_ui's Init() + the
+          # upstream a11y methods already do the same job our patch was
+          # meant to provide.
+          if 'accessibilityChildCount() const override' in h:
+              print('HistoryInner already has upstream accessibility — '
+                    'skipping our patch entirely')
+              exit(0)
+
           if 'a11yRecomputeVisible' in h:
               print('history_inner_widget.h already patched')
           else:
@@ -396,6 +410,17 @@ jobs:
           # --- header: declare a11yProcessKey + _a11yCurrentIndex field ---
           with open(h_path, 'r', encoding='utf-8') as f:
               h = f.read()
+
+          # Upstream tdesktop now ships its own keyPressEvent-driven
+          # accessibility navigation (tracks _accessibilityFocusedItem +
+          # _accessibilityFocusedIndex, calls accessibilityChildFocused on
+          # arrow keys). Step 7b just bailed for the same reason; if
+          # upstream's accessibilityChildCount override is present we
+          # have nothing left to inject here either.
+          if 'accessibilityChildCount() const override' in h:
+              print('HistoryInner already has upstream a11y navigation — '
+                    'skipping arrow-key patch')
+              exit(0)
 
           if 'a11yProcessKey' in h:
               print('history_inner_widget.h already patched (a11y key)')

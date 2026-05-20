@@ -991,7 +991,7 @@ jobs:
       # Windows finds it on LoadLibraryW("nvdaControllerClient64.dll") via
       # the default search order (process's own directory comes first), so
       # our existing nvda::Speak() implementation lights up automatically.
-      - name: Bundle nvdaControllerClient64.dll
+      - name: Bundle nvdaControllerClient.dll
         shell: bash
         run: |
           set -e
@@ -1013,21 +1013,37 @@ jobs:
           curl -L --fail --silent --show-error -o cc.zip "$BASE/$ZIPNAME"
           mkdir -p cc-extract
           unzip -q cc.zip -d cc-extract
-          # Layout: x86/ x64/ arm64/ headers/ examples/ license.txt readme.md
-          DLL=$(find cc-extract -iname 'nvdaControllerClient64.dll' | head -n 1)
+          # Modern NVDA layout: arch-specific subfolders with the same DLL
+          # filename inside:
+          #   x86/nvdaControllerClient.dll
+          #   x64/nvdaControllerClient.dll
+          #   arm64/nvdaControllerClient.dll
+          #   arm64ec/nvdaControllerClient.dll
+          # The legacy "nvdaControllerClient64.dll" naming is gone — that's
+          # what broke the previous build (69917772958). Find the x64 one
+          # specifically. As a fallback also accept the legacy filename in
+          # case NVDA reverts.
+          DLL=$(find cc-extract/x64 -iname 'nvdaControllerClient*.dll' \
+                  2>/dev/null | head -n 1)
           if [ -z "$DLL" ]; then
-            echo "ERROR: nvdaControllerClient64.dll not found in NVDA archive"
-            find cc-extract -type f | head -20
+            DLL=$(find cc-extract -ipath '*x64*nvdaControllerClient*.dll' \
+                    | head -n 1)
+          fi
+          if [ -z "$DLL" ]; then
+            echo "ERROR: x64 nvdaControllerClient DLL not found in archive"
+            find cc-extract -type f -name '*.dll' | head -20
             exit 1
           fi
-          cp "$DLL" artifact/nvdaControllerClient64.dll
-          # Carry the license file too — it's freely redistributable but the
-          # license requires attribution.
+          # Copy with the modern name so the artifact matches the current
+          # NVDA convention. Our keyboard.h tries both modern and legacy
+          # filenames on LoadLibraryW.
+          cp "$DLL" artifact/nvdaControllerClient.dll
           LIC=$(find cc-extract -iname 'license.txt' | head -n 1)
           if [ -n "$LIC" ]; then
             cp "$LIC" artifact/nvdaControllerClient-license.txt
           fi
-          echo "Bundled: $(du -h artifact/nvdaControllerClient64.dll | cut -f1)"
+          echo "Bundled $DLL -> artifact/nvdaControllerClient.dll"
+          echo "Size: $(du -h artifact/nvdaControllerClient.dll | cut -f1)"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -1068,7 +1084,7 @@ jobs:
           echo. >> setup.iss
           echo [Files] >> setup.iss
           echo Source: "artifact\Telegram.exe"; DestDir: "{app}"; Flags: ignoreversion >> setup.iss
-          echo Source: "artifact\nvdaControllerClient64.dll"; DestDir: "{app}"; Flags: ignoreversion >> setup.iss
+          echo Source: "artifact\nvdaControllerClient.dll"; DestDir: "{app}"; Flags: ignoreversion >> setup.iss
           echo Source: "artifact\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist recursesubdirs >> setup.iss
           echo. >> setup.iss
           echo [Icons] >> setup.iss
@@ -1101,7 +1117,7 @@ jobs:
         with:
           files: |
             artifact/Telegram.exe
-            artifact/nvdaControllerClient64.dll
+            artifact/nvdaControllerClient.dll
             installer/Telegram-Accessible-Setup.exe
           body: |
             ## Telegram Desktop Accessible ${{ github.ref_name }}
@@ -1112,7 +1128,7 @@ jobs:
             ### Что выбрать
             - **`Telegram-Accessible-Setup.exe`** — установщик с ярлыками
               в меню «Пуск» и (опционально) на рабочем столе. Рекомендуется.
-            - **`Telegram.exe` + `nvdaControllerClient64.dll`** — портативный
+            - **`Telegram.exe` + `nvdaControllerClient.dll`** — портативный
               вариант. Скачайте оба файла в одну папку и запустите .exe.
 
             ### Горячие клавиши

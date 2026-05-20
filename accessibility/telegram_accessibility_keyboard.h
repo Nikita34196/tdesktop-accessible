@@ -119,23 +119,48 @@ inline void EnsureLoaded() {
     if (tried) return;
     tried = true;
 
-    // Each entry is logged so we know exactly what got tried.
-    auto tryLoad = [](const QString &label, const std::wstring &path) -> HMODULE {
-        HMODULE m = path.empty()
-            ? LoadLibraryW(L"nvdaControllerClient64.dll")
-            : LoadLibraryW(path.c_str());
-        LogLine(QStringLiteral("[nvda] try %1 -> %2")
-            .arg(label,
-                 m ? QStringLiteral("loaded") : QStringLiteral("not found")));
-        return m;
+    // NVDA renamed the controller client DLL between releases:
+    //   * Modern (2024+):  nvdaControllerClient.dll
+    //                      (arch encoded in the source ZIP's folder)
+    //   * Legacy:          nvdaControllerClient64.dll / *32.dll
+    // Try both at every search path, modern first.
+    static const wchar_t *const kDllNames[] = {
+        L"nvdaControllerClient.dll",
+        L"nvdaControllerClient64.dll",
     };
 
-    HMODULE dll = tryLoad(QStringLiteral("default search path"), L"");
+    auto tryLoadAt = [](const QString &label,
+                        const std::wstring &dirPath) -> HMODULE {
+        for (auto name : kDllNames) {
+            const std::wstring fullPath = dirPath.empty()
+                ? std::wstring(name)
+                : (dirPath + L"\\" + name);
+            HMODULE m = LoadLibraryW(fullPath.c_str());
+            const QString shown = dirPath.empty()
+                ? QString::fromWCharArray(name)
+                : QString::fromStdWString(fullPath);
+            LogLine(QStringLiteral("[nvda] try %1 -> %2")
+                .arg(label.isEmpty()
+                        ? shown
+                        : QStringLiteral("%1 (%2)").arg(label, shown))
+                .arg(m
+                        ? QStringLiteral("loaded")
+                        : QStringLiteral("not found")));
+            if (m) return m;
+        }
+        return nullptr;
+    };
 
-    // Walk a directory tree looking for nvdaControllerClient64.dll. NVDA
-    // installs the controller-client DLLs in a subfolder (`controllerClient`
-    // on modern versions) — depth-first beats hardcoding sub-paths because
-    // NVDA has shipped them under different layouts over the years.
+    // First try the default search order (process dir, then PATH).
+    // After this lands, our installer/portable ZIP drops
+    // nvdaControllerClient.dll right next to Telegram.exe, so this
+    // path normally wins and the rest of EnsureLoaded never runs.
+    HMODULE dll = tryLoadAt(QStringLiteral("default search path"), L"");
+
+    // Walk a directory tree looking for either DLL name. NVDA's own
+    // install lays them out under arch-specific subdirs (x64/, x86/,
+    // arm64/) and the layout has changed across releases — depth-first
+    // beats hardcoding sub-paths.
     auto findInTree = [](const std::wstring &root) -> std::wstring {
         if (root.empty()) return {};
         std::error_code ec;
@@ -150,9 +175,10 @@ inline void EnsureLoaded() {
             std::error_code statEc;
             if (!it->is_regular_file(statEc) || statEc) continue;
             const auto name = it->path().filename().wstring();
-            if (_wcsicmp(name.c_str(),
-                    L"nvdaControllerClient64.dll") == 0) {
-                return it->path().wstring();
+            for (auto wanted : kDllNames) {
+                if (_wcsicmp(name.c_str(), wanted) == 0) {
+                    return it->path().wstring();
+                }
             }
         }
         return {};
@@ -161,21 +187,23 @@ inline void EnsureLoaded() {
     if (!dll) {
         if (auto running = FindRunningNvdaDir(); !running.empty()) {
             // Try the install root first, then walk the whole tree.
-            dll = tryLoad(
-                QStringLiteral("running nvda.exe dir (%1)")
-                    .arg(QString::fromStdWString(running)),
-                running + L"\\nvdaControllerClient64.dll");
+            dll = tryLoadAt(
+                QStringLiteral("running nvda.exe dir"),
+                running);
             if (!dll) {
                 if (auto found = findInTree(running); !found.empty()) {
-                    dll = tryLoad(
-                        QStringLiteral("recursive in %1 (found %2)")
-                            .arg(QString::fromStdWString(running))
-                            .arg(QString::fromStdWString(found)),
-                        found);
+                    HMODULE m = LoadLibraryW(found.c_str());
+                    LogLine(QStringLiteral(
+                        "[nvda] recursive in %1 found %2 -> %3")
+                        .arg(QString::fromStdWString(running),
+                             QString::fromStdWString(found),
+                             m ? QStringLiteral("loaded")
+                               : QStringLiteral("LoadLibrary failed")));
+                    dll = m;
                 } else {
                     LogLine(QStringLiteral(
-                        "[nvda] recursive scan of %1 didn't find "
-                        "nvdaControllerClient64.dll")
+                        "[nvda] recursive scan of %1 didn't find any "
+                        "nvdaControllerClient*.dll")
                         .arg(QString::fromStdWString(running)));
                 }
             }
@@ -193,47 +221,25 @@ inline void EnsureLoaded() {
         return {};
     };
 
-    if (!dll) {
-        const auto pf64 = envDir(L"ProgramW6432");
-        if (!pf64.empty()) {
-            dll = tryLoad(
-                QStringLiteral("ProgramW6432\\NVDA"),
-                pf64 + L"\\NVDA\\nvdaControllerClient64.dll");
-        }
-    }
-    if (!dll) {
-        const auto pf = envDir(L"ProgramFiles");
-        if (!pf.empty()) {
-            dll = tryLoad(
-                QStringLiteral("ProgramFiles\\NVDA"),
-                pf + L"\\NVDA\\nvdaControllerClient64.dll");
-        }
-    }
-    if (!dll) {
-        const auto pfx86 = envDir(L"ProgramFiles(x86)");
-        if (!pfx86.empty()) {
-            dll = tryLoad(
-                QStringLiteral("ProgramFiles(x86)\\NVDA"),
-                pfx86 + L"\\NVDA\\nvdaControllerClient64.dll");
-        }
-    }
-    if (!dll) {
-        const auto local = envDir(L"LOCALAPPDATA");
-        if (!local.empty()) {
-            dll = tryLoad(
-                QStringLiteral("LOCALAPPDATA\\Programs\\NVDA"),
-                local + L"\\Programs\\NVDA\\nvdaControllerClient64.dll");
-        }
-    }
-    if (!dll) {
-        const auto roaming = envDir(L"APPDATA");
-        if (!roaming.empty()) {
-            // Common portable / per-user install spot.
-            dll = tryLoad(
-                QStringLiteral("APPDATA\\nvda"),
-                roaming + L"\\nvda\\nvdaControllerClient64.dll");
-        }
-    }
+    auto tryEnvDir = [&](const QString &label,
+                         const wchar_t *envVar,
+                         const wchar_t *subPath) -> HMODULE {
+        if (dll) return dll;
+        const auto base = envDir(envVar);
+        if (base.empty()) return nullptr;
+        return (dll = tryLoadAt(label, base + subPath));
+    };
+
+    tryEnvDir(QStringLiteral("ProgramW6432\\NVDA"),
+              L"ProgramW6432", L"\\NVDA");
+    tryEnvDir(QStringLiteral("ProgramFiles\\NVDA"),
+              L"ProgramFiles", L"\\NVDA");
+    tryEnvDir(QStringLiteral("ProgramFiles(x86)\\NVDA"),
+              L"ProgramFiles(x86)", L"\\NVDA");
+    tryEnvDir(QStringLiteral("LOCALAPPDATA\\Programs\\NVDA"),
+              L"LOCALAPPDATA", L"\\Programs\\NVDA");
+    tryEnvDir(QStringLiteral("APPDATA\\nvda"),
+              L"APPDATA", L"\\nvda");
 
     if (dll) {
         SpeakPtr() = reinterpret_cast<SpeakTextFn>(

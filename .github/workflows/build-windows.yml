@@ -895,7 +895,18 @@ jobs:
         shell: cmd
         run: |
           cd %REPO_NAME%
-          cmake --build out --config Release --target Telegram --parallel
+          rem --parallel with no number defaults to all logical cores
+          rem (4 on windows-latest). For very large TUs like apiwrap.cpp
+          rem that pushes mspdbsrv.exe past its memory budget and we get
+          rem C1090 'PDB API call failed, error code 12' on link. Free
+          rem disk space confirmed >50 GB at that point — it isn't disk.
+          rem Capping at 2 parallel processes keeps total CL.exe memory
+          rem usage low enough that PDB writes never collide, at the
+          rem cost of ~50% wall-clock build time (still under the 6h
+          rem job limit). /FS also forces serialized PDB writes via the
+          rem PDB server, which is belt-and-suspenders for the same bug.
+          set CL=/FS %CL%
+          cmake --build out --config Release --target Telegram --parallel 2
 
       # ============================================
       # 12. Package

@@ -151,11 +151,39 @@ inline void EnsureLoaded() {
         return nullptr;
     };
 
-    // First try the default search order (process dir, then PATH).
-    // After this lands, our installer/portable ZIP drops
-    // nvdaControllerClient.dll right next to Telegram.exe, so this
-    // path normally wins and the rest of EnsureLoaded never runs.
-    HMODULE dll = tryLoadAt(QStringLiteral("default search path"), L"");
+    // The application's own directory is where our installer drops
+    // nvdaControllerClient.dll. We try it FIRST and via an explicit
+    // full path because Qt's startup code calls
+    //   SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)
+    // for security — that restricts subsequent bare LoadLibraryW()
+    // calls to System32 only, so the bundled DLL won't be found via
+    // the "default" search even though it sits right next to
+    // Telegram.exe. Confirmed in the user log:
+    //   [nvda] try default search path (nvdaControllerClient.dll)
+    //       -> not found
+    // with the DLL definitely present.
+    HMODULE dll = nullptr;
+    {
+        wchar_t exePath[MAX_PATH] = {};
+        const DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        if (len > 0 && len < MAX_PATH) {
+            std::wstring exeDir(exePath, len);
+            const auto slash = exeDir.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) {
+                exeDir.resize(slash);
+                dll = tryLoadAt(
+                    QStringLiteral("application directory"),
+                    exeDir);
+            }
+        }
+    }
+
+    // Default-search fallback. Mostly redundant given the explicit
+    // application-dir attempt above, but cheap and covers a future
+    // case where the DLL is on PATH or already loaded.
+    if (!dll) {
+        dll = tryLoadAt(QStringLiteral("default search path"), L"");
+    }
 
     // Walk a directory tree looking for either DLL name. NVDA's own
     // install lays them out under arch-specific subdirs (x64/, x86/,

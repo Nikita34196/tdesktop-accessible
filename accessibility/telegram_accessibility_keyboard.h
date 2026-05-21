@@ -347,9 +347,10 @@ inline void Speak(const QString &text) {
     // that's the classic "DLL stranded on the old NVDA's pipe" bug.
     // Reload on first failure, retry once. If the retry also fails
     // we genuinely can't reach NVDA.
-    static int loggedCalls = 0;
-    static int loggedReloads = 0;
-
+    //
+    // No throttle anymore — every speakText call is logged. The
+    // log file caps at 5 MiB (rotated by the next OpenLog) so even
+    // intense arrow-key sessions don't run away.
     long rc = SpeakOnce(text);
 
     bool reloaded = false;
@@ -357,27 +358,21 @@ inline void Speak(const QString &text) {
         // Likely stale RPC binding after NVDA restart. Reload the DLL
         // and try once more — DllMain's PROCESS_DETACH/_ATTACH cycle
         // resets the internal binding to point at the running NVDA.
-        if (loggedReloads < 3) {
-            ++loggedReloads;
-            LogLine(QStringLiteral(
-                "[nvda] speakText rc=%1 — reloading DLL").arg(rc));
-        }
+        LogLine(QStringLiteral(
+            "[nvda] speakText rc=%1 — reloading DLL").arg(rc));
         Reload();
         reloaded = true;
         rc = SpeakOnce(text);
     }
 
-    if (loggedCalls < 10) {
-        ++loggedCalls;
-        LogLine(QStringLiteral(
-            "[nvda] speakText(%1 chars)%2 rc=%3 first40=\"%4\"")
-            .arg(text.size())
-            .arg(reloaded
-                    ? QStringLiteral(" [after reload]")
-                    : QString())
-            .arg(rc)
-            .arg(text.left(40).replace(QChar('\n'), QChar(' '))));
-    }
+    LogLine(QStringLiteral(
+        "[nvda] speakText(%1 chars)%2 rc=%3 first40=\"%4\"")
+        .arg(text.size())
+        .arg(reloaded
+                ? QStringLiteral(" [after reload]")
+                : QString())
+        .arg(rc)
+        .arg(text.left(40).replace(QChar('\n'), QChar(' '))));
 }
 
 #else // Q_OS_WIN

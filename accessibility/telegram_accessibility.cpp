@@ -38,6 +38,7 @@
 #include <QDebug>
 #include <QTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QTextStream>
 #include <QStandardPaths>
 #include <QMutex>
@@ -69,17 +70,36 @@ void OpenLog() {
             QStandardPaths::HomeLocation);
     }
     if (dir.isEmpty()) return;
-    g_logFile = new QFile(dir + QStringLiteral("/tg_widgets_log.txt"));
+
+    const QString path = dir + QStringLiteral("/tg_widgets_log.txt");
+
+    // Cap log size at 5 MiB. If it grew past that across sessions,
+    // rotate by moving the current file aside so a fresh one starts.
+    // Keeps the previous session's log around for one more launch
+    // without unbounded growth.
+    constexpr qint64 kMaxLogBytes = 5 * 1024 * 1024;
+    if (QFileInfo(path).size() > kMaxLogBytes) {
+        const QString oldPath = path + QStringLiteral(".old");
+        QFile::remove(oldPath);
+        QFile::rename(path, oldPath);
+    }
+
+    g_logFile = new QFile(path);
+    // Append mode: previous session's lines stay, so a user testing
+    // arrow-key navigation and then sending the file gets the full
+    // history including any [nvda] rc lines from before they relaunched
+    // Telegram. Truncate-on-open ate those before — we used to lose
+    // every speakText return code the moment the app restarted.
     if (!g_logFile->open(QIODevice::WriteOnly
-            | QIODevice::Truncate | QIODevice::Text)) {
+            | QIODevice::Append | QIODevice::Text)) {
         delete g_logFile;
         g_logFile = nullptr;
         return;
     }
     QTextStream(g_logFile)
-        << "tg_widgets_log — started "
+        << "\n=== tg_widgets_log — session started "
         << QDateTime::currentDateTime().toString(Qt::ISODate)
-        << "\n";
+        << " ===\n";
     g_logFile->flush();
 }
 

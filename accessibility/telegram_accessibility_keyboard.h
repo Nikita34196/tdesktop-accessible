@@ -288,13 +288,51 @@ inline void EnsureLoaded() {
 inline void Speak(const QString &text) {
     EnsureLoaded();
     if (text.isEmpty()) return;
-    // Cancel any in-flight speech first so rapid Up/Down arrows don't
-    // pile up a long queue we'd have to wait through.
+
+    // nvdaController_speakText returns error_status_t (a 32-bit RPC code).
+    // 0 == success. Anything else means NVDA didn't actually speak the
+    // text. Common values:
+    //   1722 (RPC_S_SERVER_UNAVAILABLE) — NVDA process isn't listening
+    //   1726 (RPC_S_CALL_FAILED) — IPC pipe broke mid-call
+    //   1727 (RPC_S_CALL_FAILED_DNE) — endpoint mapper rejection
+    //   1717 (RPC_S_UNKNOWN_IF) — DLL ABI mismatch vs the running NVDA
+    // We log the first few outcomes so we can finally tell whether
+    // NVDA refused, the IPC broke, or speech worked at the API level
+    // but the user just didn't hear it (e.g. screen-reader muted).
+    // Throttled to the first ~10 distinct results so the log doesn't
+    // explode when the user mashes arrow keys.
+    static int loggedSpeakCalls = 0;
+    static int loggedCancelCalls = 0;
+
     if (auto cancel = CancelPtr()) {
-        cancel();
+        const auto rc = cancel();
+        if (loggedCancelCalls < 5) {
+            ++loggedCancelCalls;
+            LogLine(QStringLiteral(
+                "[nvda] cancelSpeech() rc=%1").arg(long(rc)));
+        }
     }
     if (auto speak = SpeakPtr()) {
-        speak(reinterpret_cast<const wchar_t *>(text.utf16()));
+        const auto rc = speak(
+            reinterpret_cast<const wchar_t *>(text.utf16()));
+        if (loggedSpeakCalls < 10) {
+            ++loggedSpeakCalls;
+            LogLine(QStringLiteral(
+                "[nvda] speakText(%1 chars) rc=%2 first40=\"%3\"")
+                .arg(text.size())
+                .arg(long(rc))
+                .arg(text.left(40).replace(QChar('\n'), QChar(' '))));
+        }
+    } else {
+        // Should never happen — EnsureLoaded() would have left
+        // SpeakPtr() null only if the DLL wasn't found, in which case
+        // we wouldn't be here.
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            LogLine(QStringLiteral(
+                "[nvda] Speak() called but SpeakPtr is null"));
+        }
     }
 }
 

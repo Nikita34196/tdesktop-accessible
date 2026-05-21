@@ -68,6 +68,18 @@ inline CancelSpeechFn &CancelPtr() {
     return p;
 }
 
+// HMODULE for the loaded controllerClient DLL. Tracked so we can
+// FreeLibrary it and reload — necessary when NVDA restarts under us
+// (the DLL's internal RPC binding gets stranded on the old NVDA's
+// pipe, so every speakText call silently returns RPC_S_CALL_FAILED
+// until we re-init the DLL).
+inline HMODULE &DllHandle() { static HMODULE h = nullptr; return h; }
+
+// Set by Install() to false after Init/EnsureLoaded has had its
+// first pass. Reset to false by Reload() so the next Speak() call
+// re-runs the full search-and-load sequence.
+inline bool &LoadAttempted() { static bool t = false; return t; }
+
 // Walk the running process list and return the directory of nvda.exe
 // (or an empty string if it isn't running). This is the most reliable
 // way to find the NVDA install — works for default installs, portable
@@ -115,9 +127,8 @@ inline std::wstring FindRunningNvdaDir() {
 }
 
 inline void EnsureLoaded() {
-    static bool tried = false;
-    if (tried) return;
-    tried = true;
+    if (LoadAttempted()) return;
+    LoadAttempted() = true;
 
     // NVDA renamed the controller client DLL between releases:
     //   * Modern (2024+):  nvdaControllerClient.dll
@@ -270,6 +281,7 @@ inline void EnsureLoaded() {
               L"APPDATA", L"\\nvda");
 
     if (dll) {
+        DllHandle() = dll;
         SpeakPtr() = reinterpret_cast<SpeakTextFn>(
             GetProcAddress(dll, "nvdaController_speakText"));
         CancelPtr() = reinterpret_cast<CancelSpeechFn>(
@@ -285,6 +297,40 @@ inline void EnsureLoaded() {
     }
 }
 
+// Free the DLL and reset state so the next Speak() call re-loads from
+// scratch. Needed when NVDA restarts: the controllerClient DLL keeps
+// an internal RPC binding to the (now-dead) old NVDA process, and
+// every subsequent speakText() silently returns RPC_S_CALL_FAILED
+// against the stale pipe. Reload forces DllMain's PROCESS_DETACH
+// (clearing the binding) and the next LoadLibraryW gets a fresh one
+// pointing at the running NVDA.
+inline void Reload() {
+    if (HMODULE h = DllHandle()) {
+        FreeLibrary(h);
+    }
+    DllHandle() = nullptr;
+    SpeakPtr() = nullptr;
+    CancelPtr() = nullptr;
+    LoadAttempted() = false;
+    LogLine(QStringLiteral(
+        "[nvda] reloading controller client DLL (NVDA may have "
+        "restarted)"));
+    EnsureLoaded();
+}
+
+// One shot: call cancelSpeech (best-effort) then speakText. Returns
+// the rc from speakText (0 on success). Used by Speak() which may
+// retry after a Reload() if NVDA restarted.
+inline long SpeakOnce(const QString &text) {
+    if (auto cancel = CancelPtr()) {
+        cancel();
+    }
+    if (auto speak = SpeakPtr()) {
+        return speak(reinterpret_cast<const wchar_t *>(text.utf16()));
+    }
+    return -1; // pointer not available
+}
+
 inline void Speak(const QString &text) {
     EnsureLoaded();
     if (text.isEmpty()) return;
@@ -296,43 +342,41 @@ inline void Speak(const QString &text) {
     //   1726 (RPC_S_CALL_FAILED) — IPC pipe broke mid-call
     //   1727 (RPC_S_CALL_FAILED_DNE) — endpoint mapper rejection
     //   1717 (RPC_S_UNKNOWN_IF) — DLL ABI mismatch vs the running NVDA
-    // We log the first few outcomes so we can finally tell whether
-    // NVDA refused, the IPC broke, or speech worked at the API level
-    // but the user just didn't hear it (e.g. screen-reader muted).
-    // Throttled to the first ~10 distinct results so the log doesn't
-    // explode when the user mashes arrow keys.
-    static int loggedSpeakCalls = 0;
-    static int loggedCancelCalls = 0;
+    // The user reported: chat list spoke fine on first launch, but
+    // after restarting NVDA only the very first chat got announced —
+    // that's the classic "DLL stranded on the old NVDA's pipe" bug.
+    // Reload on first failure, retry once. If the retry also fails
+    // we genuinely can't reach NVDA.
+    static int loggedCalls = 0;
+    static int loggedReloads = 0;
 
-    if (auto cancel = CancelPtr()) {
-        const auto rc = cancel();
-        if (loggedCancelCalls < 5) {
-            ++loggedCancelCalls;
+    long rc = SpeakOnce(text);
+
+    bool reloaded = false;
+    if (rc != 0 && rc != -1) {
+        // Likely stale RPC binding after NVDA restart. Reload the DLL
+        // and try once more — DllMain's PROCESS_DETACH/_ATTACH cycle
+        // resets the internal binding to point at the running NVDA.
+        if (loggedReloads < 3) {
+            ++loggedReloads;
             LogLine(QStringLiteral(
-                "[nvda] cancelSpeech() rc=%1").arg(long(rc)));
+                "[nvda] speakText rc=%1 — reloading DLL").arg(rc));
         }
+        Reload();
+        reloaded = true;
+        rc = SpeakOnce(text);
     }
-    if (auto speak = SpeakPtr()) {
-        const auto rc = speak(
-            reinterpret_cast<const wchar_t *>(text.utf16()));
-        if (loggedSpeakCalls < 10) {
-            ++loggedSpeakCalls;
-            LogLine(QStringLiteral(
-                "[nvda] speakText(%1 chars) rc=%2 first40=\"%3\"")
-                .arg(text.size())
-                .arg(long(rc))
-                .arg(text.left(40).replace(QChar('\n'), QChar(' '))));
-        }
-    } else {
-        // Should never happen — EnsureLoaded() would have left
-        // SpeakPtr() null only if the DLL wasn't found, in which case
-        // we wouldn't be here.
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            LogLine(QStringLiteral(
-                "[nvda] Speak() called but SpeakPtr is null"));
-        }
+
+    if (loggedCalls < 10) {
+        ++loggedCalls;
+        LogLine(QStringLiteral(
+            "[nvda] speakText(%1 chars)%2 rc=%3 first40=\"%4\"")
+            .arg(text.size())
+            .arg(reloaded
+                    ? QStringLiteral(" [after reload]")
+                    : QString())
+            .arg(rc)
+            .arg(text.left(40).replace(QChar('\n'), QChar(' '))));
     }
 }
 

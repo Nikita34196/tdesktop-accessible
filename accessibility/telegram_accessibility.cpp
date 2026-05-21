@@ -266,17 +266,60 @@ void Install() {
         .arg(Ui::ScreenReaderModeActive() ? 1 : 0)
         .arg(QAccessible::isActive() ? 1 : 0));
 
-    // Log every transition so we can see in tg_widgets_log.txt whether
-    // NVDA was detected at all (or detected late, after focusing chats).
-    // The lib_rpl in tdesktop exposes the subscribe terminal as
-    // `rpl::on_next(handler, lifetime)` — `start_with_next` from newer rpl
-    // forks doesn't exist here. Static lifetime keeps it alive for the
-    // process.
+    // Log every screen-reader transition AND nudge NVDA to re-enumerate
+    // the accessibility tree whenever it becomes active (first attach
+    // OR user-triggered restart of NVDA while Telegram is running).
+    //
+    // Why this matters: on first launch NVDA sometimes attaches BEFORE
+    // lib_ui's FocusManager has run its rpl handler that flips every
+    // existing widget from focusPolicy=NoFocus to its proper
+    // accessibilityFocusPolicy() value. NVDA caches the initial
+    // "not focusable" view and never re-reads — so until the user
+    // manually restarts NVDA, all the buttons/inputs/etc. appear dead
+    // to the screen reader even though the underlying Qt accessibility
+    // is now correct.
+    //
+    // Firing QAccessibleEvent(mainWindow, ObjectShow) is equivalent to
+    // the WinEvent EVENT_OBJECT_SHOW on the main HWND, which NVDA
+    // reacts to by re-enumerating the focused window's tree. That's
+    // the same code path NVDA runs on its own startup, so this turns
+    // a "restart NVDA to make everything readable" scenario into the
+    // automatic post-init behavior.
     static rpl::lifetime kScreenReaderLifetime;
     Ui::ScreenReaderModeActiveValue(
     ) | rpl::on_next([](bool active) {
         Log(QStringLiteral("[ScreenReader] active changed -> %1")
             .arg(active ? 1 : 0));
+        if (!active) return;
+        // Defer one event-loop tick so lib_ui's FocusManager finishes
+        // updating focus policies on existing widgets before we ask
+        // NVDA to look again.
+        QTimer::singleShot(0, qApp, [] {
+            // Largest visible top-level window — that's MainWindow.
+            QWidget *target = nullptr;
+            for (QWidget *w : QApplication::topLevelWidgets()) {
+                if (!w || !w->isVisible() || !w->isWindow()) continue;
+                if (!target
+                    || (w->width() * w->height())
+                        > (target->width() * target->height())) {
+                    target = w;
+                }
+            }
+            if (!target) return;
+            Log(QStringLiteral(
+                "[ScreenReader] nudging NVDA: ObjectShow on %1")
+                .arg(QString::fromUtf8(target->metaObject()->className())));
+            QAccessibleEvent show(target, QAccessible::ObjectShow);
+            QAccessible::updateAccessibility(&show);
+            // ParentChanged on focus widget jolts NVDA in cases where
+            // ObjectShow alone wasn't enough — it forces a re-walk of
+            // the focused subtree.
+            if (QWidget *focused = QApplication::focusWidget()) {
+                QAccessibleEvent parentChanged(
+                    focused, QAccessible::ParentChanged);
+                QAccessible::updateAccessibility(&parentChanged);
+            }
+        });
     }, kScreenReaderLifetime);
 
     // Defer keyboard nav until the event loop is up and qApp / main

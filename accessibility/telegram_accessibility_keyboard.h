@@ -318,22 +318,43 @@ inline void Reload() {
     EnsureLoaded();
 }
 
-// One shot: call cancelSpeech (best-effort) then speakText. Returns
-// the rc from speakText (0 on success). Used by Speak() which may
-// retry after a Reload() if NVDA restarted.
+// One shot: call speakText. nvdaController_speakText already
+// interrupts any in-progress NVDA speech and replaces it with the
+// new text, so a separate cancelSpeech() call is redundant and
+// turned out to be actively harmful: when the user holds an arrow
+// key (auto-repeat) every keypress fires cancel+speak in quick
+// succession, killing NVDA's speech before it can finish even the
+// first syllable. The log showed eight identical
+//   [nvda] speakText(200 chars) rc=0 first40="Channel, Rozetked..."
+// lines in a row — NVDA accepted each one (rc=0) but heard nothing
+// because each call wiped the previous queue mid-utterance.
 inline long SpeakOnce(const QString &text) {
-    if (auto cancel = CancelPtr()) {
-        cancel();
-    }
     if (auto speak = SpeakPtr()) {
         return speak(reinterpret_cast<const wchar_t *>(text.utf16()));
     }
     return -1; // pointer not available
 }
 
+inline QString &LastSpokenText() {
+    static QString last;
+    return last;
+}
+
 inline void Speak(const QString &text) {
     EnsureLoaded();
     if (text.isEmpty()) return;
+
+    // Dedupe consecutive identical text. Holding an arrow key past
+    // the end of the list (or any other case where the focused row
+    // doesn't change) used to issue dozens of speakText calls per
+    // second for the same string; NVDA cancels its own speech to
+    // start the "new" one, so the user heard a long stutter or
+    // nothing at all. If text hasn't changed, do nothing — NVDA will
+    // finish reading what it's already saying.
+    if (text == LastSpokenText()) {
+        return;
+    }
+    LastSpokenText() = text;
 
     // nvdaController_speakText returns error_status_t (a 32-bit RPC code).
     // 0 == success. Anything else means NVDA didn't actually speak the
@@ -342,22 +363,12 @@ inline void Speak(const QString &text) {
     //   1726 (RPC_S_CALL_FAILED) — IPC pipe broke mid-call
     //   1727 (RPC_S_CALL_FAILED_DNE) — endpoint mapper rejection
     //   1717 (RPC_S_UNKNOWN_IF) — DLL ABI mismatch vs the running NVDA
-    // The user reported: chat list spoke fine on first launch, but
-    // after restarting NVDA only the very first chat got announced —
-    // that's the classic "DLL stranded on the old NVDA's pipe" bug.
-    // Reload on first failure, retry once. If the retry also fails
-    // we genuinely can't reach NVDA.
-    //
-    // No throttle anymore — every speakText call is logged. The
-    // log file caps at 5 MiB (rotated by the next OpenLog) so even
-    // intense arrow-key sessions don't run away.
+    // On rc != 0, reload the DLL (NVDA likely restarted, stranding
+    // our RPC binding) and retry once.
     long rc = SpeakOnce(text);
 
     bool reloaded = false;
     if (rc != 0 && rc != -1) {
-        // Likely stale RPC binding after NVDA restart. Reload the DLL
-        // and try once more — DllMain's PROCESS_DETACH/_ATTACH cycle
-        // resets the internal binding to point at the running NVDA.
         LogLine(QStringLiteral(
             "[nvda] speakText rc=%1 — reloading DLL").arg(rc));
         Reload();

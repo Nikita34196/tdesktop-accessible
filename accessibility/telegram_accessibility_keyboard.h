@@ -386,7 +386,35 @@ inline void Speak(const QString &text) {
         .arg(text.left(40).replace(QChar('\n'), QChar(' '))));
 }
 
+// Startup self-test. Speaks one fixed phrase shortly after the DLL is
+// loaded. Diagnostic intent:
+//   * If the user HEARS it -> nvdaController_speakText genuinely
+//     produces audio on their NVDA; any remaining "silent on arrow
+//     keys" problem is navigation-specific (queueing, dedupe,
+//     event-timing) and we keep digging there.
+//   * If the user does NOT hear it but the log shows rc=0 -> NVDA
+//     accepts the RPC but never voices it. That points at NVDA-side
+//     state (speech mode, sleep mode, synth) rather than our code,
+//     and we'd switch strategy entirely.
+// Bypasses the LastSpokenText() dedupe on purpose — it's a one-shot.
+inline void SelfTest() {
+    EnsureLoaded();
+    const auto phrase = QStringLiteral(
+        "Специальные возможности Telegram загружены.");
+    long rc = SpeakOnce(phrase);
+    if (rc != 0 && rc != -1) {
+        Reload();
+        rc = SpeakOnce(phrase);
+    }
+    LogLine(QStringLiteral(
+        "[nvda] SELF-TEST speakText rc=%1 — if you did not hear "
+        "the test phrase, controllerClient speech is not reaching "
+        "NVDA's synthesizer despite the success code").arg(rc));
+}
+
 #else // Q_OS_WIN
+
+inline void SelfTest() {}
 
 inline void Speak(const QString &) {}
 

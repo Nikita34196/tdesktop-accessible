@@ -286,59 +286,35 @@ void Install() {
         .arg(Ui::ScreenReaderModeActive() ? 1 : 0)
         .arg(QAccessible::isActive() ? 1 : 0));
 
-    // Log every screen-reader transition AND nudge NVDA to re-enumerate
-    // the accessibility tree whenever it becomes active (first attach
-    // OR user-triggered restart of NVDA while Telegram is running).
+    // Log every screen-reader transition. When NVDA becomes active,
+    // fire a one-shot speech self-test through the controller client.
     //
-    // Why this matters: on first launch NVDA sometimes attaches BEFORE
-    // lib_ui's FocusManager has run its rpl handler that flips every
-    // existing widget from focusPolicy=NoFocus to its proper
-    // accessibilityFocusPolicy() value. NVDA caches the initial
-    // "not focusable" view and never re-reads — so until the user
-    // manually restarts NVDA, all the buttons/inputs/etc. appear dead
-    // to the screen reader even though the underlying Qt accessibility
-    // is now correct.
+    // The ObjectShow "nudge" that used to live here (fire
+    // QAccessibleEvent(mainWindow, ObjectShow) to make NVDA
+    // re-enumerate) was removed: it correlated exactly with the
+    // regression where even the first chat stopped being announced.
+    // Forcing NVDA to re-walk the tree from the window root appears
+    // to drop its tracking of the focused list child.
     //
-    // Firing QAccessibleEvent(mainWindow, ObjectShow) is equivalent to
-    // the WinEvent EVENT_OBJECT_SHOW on the main HWND, which NVDA
-    // reacts to by re-enumerating the focused window's tree. That's
-    // the same code path NVDA runs on its own startup, so this turns
-    // a "restart NVDA to make everything readable" scenario into the
-    // automatic post-init behavior.
+    // The self-test is purely diagnostic. The latest log shows every
+    // nvdaController_speakText returning rc=0 (success) while the user
+    // hears nothing — so we need to know whether the controller path
+    // produces ANY audio at all. SelfTest() speaks one fixed phrase a
+    // few seconds after NVDA attaches:
+    //   * heard      -> controller speech works; the arrow-key silence
+    //                   is a navigation/timing issue, keep digging there
+    //   * not heard  -> NVDA accepts the RPC but never voices it;
+    //                   the problem is NVDA-side and we change approach
     static rpl::lifetime kScreenReaderLifetime;
     Ui::ScreenReaderModeActiveValue(
     ) | rpl::on_next([](bool active) {
         Log(QStringLiteral("[ScreenReader] active changed -> %1")
             .arg(active ? 1 : 0));
         if (!active) return;
-        // Defer one event-loop tick so lib_ui's FocusManager finishes
-        // updating focus policies on existing widgets before we ask
-        // NVDA to look again.
-        QTimer::singleShot(0, qApp, [] {
-            // Largest visible top-level window — that's MainWindow.
-            QWidget *target = nullptr;
-            for (QWidget *w : QApplication::topLevelWidgets()) {
-                if (!w || !w->isVisible() || !w->isWindow()) continue;
-                if (!target
-                    || (w->width() * w->height())
-                        > (target->width() * target->height())) {
-                    target = w;
-                }
-            }
-            if (!target) return;
-            Log(QStringLiteral(
-                "[ScreenReader] nudging NVDA: ObjectShow on %1")
-                .arg(QString::fromUtf8(target->metaObject()->className())));
-            QAccessibleEvent show(target, QAccessible::ObjectShow);
-            QAccessible::updateAccessibility(&show);
-            // ParentChanged on focus widget jolts NVDA in cases where
-            // ObjectShow alone wasn't enough — it forces a re-walk of
-            // the focused subtree.
-            if (QWidget *focused = QApplication::focusWidget()) {
-                QAccessibleEvent parentChanged(
-                    focused, QAccessible::ParentChanged);
-                QAccessible::updateAccessibility(&parentChanged);
-            }
+        // Delay so NVDA finishes its own attach/startup chatter
+        // before our test phrase, otherwise NVDA might interrupt it.
+        QTimer::singleShot(2500, qApp, [] {
+            TgAccessibility::nvda::SelfTest();
         });
     }, kScreenReaderLifetime);
 

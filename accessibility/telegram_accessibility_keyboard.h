@@ -503,6 +503,23 @@ protected:
             return QObject::eventFilter(obj, event);
         }
 
+        // Never hijack keys while a popup menu or modal dialog is open.
+        //
+        // Bug this fixes: opening a message context menu with Shift+F10
+        // and then pressing Escape did not close it. Our Escape handler
+        // below intercepts Escape globally and redirects focus to the
+        // chat list, returning true — so the event was consumed before
+        // the Ui::PopupMenu ever saw it. The menu stayed open (just lost
+        // visible focus) and the next arrow key "revived" it.
+        //
+        // While a popup/modal is up the user is interacting with THAT;
+        // F6 panel-cycling, arrow announcements and our Escape redirect
+        // all make no sense there. Let every key fall through untouched.
+        if (QApplication::activePopupWidget()
+            || QApplication::activeModalWidget()) {
+            return QObject::eventFilter(obj, event);
+        }
+
         auto *ke = static_cast<QKeyEvent *>(event);
         const int key = ke->key();
         const auto mods = ke->modifiers();

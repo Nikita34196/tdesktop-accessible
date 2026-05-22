@@ -115,6 +115,75 @@ jobs:
           fi
 
       # ============================================
+      # 6b. Make QRhi shader compilation optional.
+      #
+      # Upstream tdesktop (commit e75dba5, the "thanos" particle
+      # dissolution effect) ships GLSL shaders under Telegram/shaders/
+      # and Telegram/cmake/qrhi_shaders.cmake hard-fails the whole
+      # CMake configure with message(FATAL_ERROR ...) if the QSB tool
+      # (Qt Shader Baker) isn't on PATH. QSB lives in Qt's shadertools
+      # module, which tdesktop's prepare.py doesn't build, so our
+      # configure step dies before it even starts (builds 70202372375
+      # and 70216217792 both failed exactly here).
+      #
+      # We don't need the thanos effect — it's a purely cosmetic
+      # message-deletion animation. Rewrite the FATAL_ERROR branch into
+      # message(STATUS ...) + return(), which cleanly skips shader
+      # compilation. return() exits the include()'d file early so the
+      # rest of qrhi_shaders.cmake (which would invoke the missing QSB)
+      # never runs; Telegram still builds, just without the GPU
+      # particle shaders.
+      # ============================================
+      - name: Make QRhi shaders optional
+        shell: python
+        run: |
+          import os, re
+
+          path = 'tdesktop/Telegram/cmake/qrhi_shaders.cmake'
+          if not os.path.exists(path):
+              print(f'{path} not present — nothing to patch (upstream '
+                    'may have removed the shader requirement)')
+              exit(0)
+
+          with open(path, 'r', encoding='utf-8') as f:
+              src = f.read()
+
+          if 'accessibility-patch' in src:
+              print('qrhi_shaders.cmake already patched')
+              exit(0)
+
+          # Match the whole `if (NOT QSB_EXECUTABLE) ... endif()` block.
+          # Non-greedy + count=1 grabs the first (and only) one.
+          pattern = (
+              r'if\s*\(\s*NOT\s+QSB_EXECUTABLE\s*\)'
+              r'.*?'
+              r'endif\s*\(\s*\)'
+          )
+          replacement = (
+              'if (NOT QSB_EXECUTABLE)\n'
+              '    # accessibility-patch: QSB (Qt Shader Baker) is not\n'
+              '    # available in this build environment. Skip QRhi\n'
+              '    # shader compilation instead of failing configure.\n'
+              '    message(STATUS\n'
+              '        "accessibility-patch: QSB not found, skipping "\n'
+              '        "QRhi shader compilation (thanos effect disabled)")\n'
+              '    return()\n'
+              'endif()'
+          )
+          src2, n = re.subn(pattern, replacement, src,
+                            count=1, flags=re.DOTALL)
+          if n == 0:
+              print('WARNING: QSB_EXECUTABLE guard block not found — '
+                    'upstream qrhi_shaders.cmake shape changed. '
+                    'Leaving file untouched; configure may still fail.')
+              exit(0)
+
+          with open(path, 'w', encoding='utf-8') as f:
+              f.write(src2)
+          print('qrhi_shaders.cmake patched — shader compilation now '
+                'optional')
+
+      # ============================================
       # 7. Patch Application startup
       # ============================================
       - name: Patch Application init

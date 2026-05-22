@@ -316,6 +316,32 @@ void Install() {
         QTimer::singleShot(2500, qApp, [] {
             TgAccessibility::nvda::SelfTest();
         });
+
+        // Targeted re-enumeration nudge.
+        //
+        // After an app restart NVDA can attach and walk the accessibility
+        // tree before lib_ui's FocusManager has finished wiring the
+        // dialogs list (ScreenReaderModeActive only just became true).
+        // It then caches an empty/stale child list for Dialogs::InnerWidget
+        // and never re-reads it — the chat list goes silent under arrows.
+        //
+        // We can't fix this with an ObjectShow on the main window: that
+        // re-walk from the window root drops NVDA's focus tracking (the
+        // regression that broke even the first chat). Instead, once the
+        // list exists, fire ObjectReorder on the InnerWidget ITSELF so
+        // NVDA re-reads only that subtree, leaving the window root and
+        // the focus chain untouched.
+        QTimer::singleShot(1200, qApp, [] {
+            QWidget *root = TgAccessibility::detail::FindMainWindow();
+            if (!root) return;
+            QWidget *list = TgAccessibility::detail::FindByType(
+                root, "Dialogs::InnerWidget");
+            if (!list) return;
+            QAccessibleEvent reorder(list, QAccessible::ObjectReorder);
+            QAccessible::updateAccessibility(&reorder);
+            Log(QStringLiteral("[ScreenReader] fired ObjectReorder on "
+                               "Dialogs::InnerWidget (restart nudge)"));
+        });
     }, kScreenReaderLifetime);
 
     // Defer keyboard nav until the event loop is up and qApp / main

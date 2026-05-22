@@ -729,6 +729,19 @@ private:
             // Most Telegram panels don't accept focus by default.
             w->setFocusPolicy(Qt::StrongFocus);
         }
+
+        // After an app restart NVDA sometimes keeps a stale (empty) child
+        // list for this panel because it enumerated the accessibility tree
+        // before lib_ui finished wiring it. Fire a targeted ObjectReorder
+        // on the panel itself so NVDA re-reads ONLY this widget's children
+        // (e.g. the dialogs list) without disturbing the window root or
+        // the global focus chain - that is what the removed ObjectShow
+        // nudge got wrong.
+        {
+            QAccessibleEvent reorder(w, QAccessible::ObjectReorder);
+            QAccessible::updateAccessibility(&reorder);
+        }
+
         w->setFocus(Qt::ShortcutFocusReason);
 
         QAccessibleEvent ev(w, QAccessible::Focus);

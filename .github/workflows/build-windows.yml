@@ -859,6 +859,140 @@ jobs:
           print('lib_ui rp_widget.cpp patched (extra a11y events)')
 
       # ============================================
+      # 7f. Enter activates the focused message's main content.
+      #
+      # When a screen-reader user has navigated to a message with the
+      # arrow keys, pressing Enter should open whatever that message
+      # carries — a file, photo, video or link. Upstream HistoryInner
+      # has no Enter handler for this; the only keyboard action on a
+      # focused message is Space (play/pause media).
+      #
+      # Implementation: a11yActivateFocused() hit-tests the focused
+      # element along its vertical centre line via Element::textState,
+      # collects the first ClickHandler it finds (centre first so a
+      # media bubble resolves to its main content rather than the
+      # sender-name link at the top), and fires it through the same
+      # ActivateClickHandler path a real mouse click uses.
+      #
+      # This is "phase 1" — it reliably opens single-content messages.
+      # Multi-link messages still fall back to the Shift+F10 context
+      # menu; full Tab-through-every-clickable navigation is phase 2.
+      # ============================================
+      - name: Patch HistoryInner for Enter-to-activate
+        shell: python
+        run: |
+          import os, re
+
+          h_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.h'
+          cpp_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.cpp'
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skipping Enter-activate patch')
+                  exit(0)
+
+          # --- header: declare a11yActivateFocused() ---
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'a11yActivateFocused' in h:
+              print('history_inner_widget.h already patched (Enter-activate)')
+          else:
+              # Inject right after the accessibilityChildSubItemValue
+              # declaration — keeps it inside the same accessibility block.
+              h, n = re.subn(
+                  r'(QString\s+accessibilityChildSubItemValue\s*\(\s*'
+                  r'int\s+row\s*,\s*int\s+column\s*\)\s*const\s+override\s*;)',
+                  lambda m: m.group(1)
+                      + '\n\tvoid a11yActivateFocused();',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: accessibilityChildSubItemValue landmark '
+                        'not found in .h')
+                  exit(1)
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('history_inner_widget.h patched (Enter-activate)')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'a11yActivateFocused' in cpp:
+              print('history_inner_widget.cpp already patched (Enter-activate)')
+              exit(0)
+
+          # Inject the Enter/Return handler just before the existing
+          # Space handler inside keyPressEvent's `if (count > 0)` block,
+          # so it sits in exactly the same screen-reader navigation
+          # context as Space.
+          key_inject = (
+              'if (e->key() == Qt::Key_Return\n'
+              '\t\t\t|| e->key() == Qt::Key_Enter) {\n'
+              '\t\t\ta11yActivateFocused();\n'
+              '\t\t\te->accept();\n'
+              '\t\t\treturn;\n'
+              '\t\t}\n'
+              '\n'
+              '\t\t'
+          )
+          cpp, n = re.subn(
+              r'(\bif \(e->key\(\) == Qt::Key_Space\) \{)',
+              lambda m: key_inject + m.group(1),
+              cpp,
+              count=1)
+          if n == 0:
+              print('ERROR: Key_Space handler landmark not found in .cpp')
+              exit(1)
+
+          # Append the implementation. Same translation unit as the
+          # ActivateClickHandler / textState / viewByItem / itemTop /
+          # mapPointToItem / prepareClickContext helpers it relies on,
+          # all already used by mouseActionFinish in this file.
+          impl = (
+              '\n'
+              '// === Enter-to-activate (added by accessibility-patch) ===\n'
+              'void HistoryInner::a11yActivateFocused() {\n'
+              '\tif (!_accessibilityFocusedItem) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tconst auto view = viewByItem(_accessibilityFocusedItem);\n'
+              '\tif (!view) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tconst auto top = itemTop(view);\n'
+              '\tif (top < 0) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tconst auto h = view->height();\n'
+              '\tconst auto x = width() / 2;\n'
+              '\tauto request = StateRequest();\n'
+              '\tClickHandlerPtr link;\n'
+              '\tfor (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {\n'
+              '\t\tconst auto y = top + int(h * frac);\n'
+              '\t\tconst auto itemPoint = mapPointToItem(QPoint(x, y), view);\n'
+              '\t\tconst auto state = view->textState(itemPoint, request);\n'
+              '\t\tif (state.link) {\n'
+              '\t\t\tlink = state.link;\n'
+              '\t\t\tbreak;\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\tif (link) {\n'
+              '\t\tActivateClickHandler(\n'
+              '\t\t\twindow(),\n'
+              '\t\t\tlink,\n'
+              '\t\t\tprepareClickContext(\n'
+              '\t\t\t\tQt::LeftButton,\n'
+              '\t\t\t\t_accessibilityFocusedItem->fullId()));\n'
+              '\t}\n'
+              '}\n'
+          )
+          cpp = cpp.rstrip() + '\n' + impl
+          with open(cpp_path, 'w', encoding='utf-8') as f:
+              f.write(cpp)
+          print('history_inner_widget.cpp patched (Enter-activate)')
+
+      # ============================================
       # 8. Cache third-party libraries
       # ============================================
       - name: Generate cache key

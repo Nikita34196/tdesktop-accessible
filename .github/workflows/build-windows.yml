@@ -859,6 +859,90 @@ jobs:
           print('lib_ui rp_widget.cpp patched (extra a11y events)')
 
       # ============================================
+      # 7g. Make Dialogs::InnerWidget report state.focused = true
+      #     UNCONDITIONALLY for the currently-selected chat row.
+      #
+      # The chat list was silent under arrow navigation despite our
+      # patched accessibilityChildFocused firing Focus + Selection +
+      # StateChange + child-Focus on the right index, with the right
+      # childCount and the right focusChild.name. HistoryInner with
+      # the EXACT same machinery is announced fine in the same NVDA
+      # session.
+      #
+      # The root-cause difference (confirmed in upstream source):
+      #
+      #   HistoryInner::accessibilityChildState():
+      #     if (index == _accessibilityFocusedIndex) {
+      #         state.focused = true;     // unconditional
+      #         state.active = true;
+      #     }
+      #
+      #   Dialogs::InnerWidget::accessibilityChildState():
+      #     if (it->get() == _selected) {
+      #         state.selected = true;
+      #         state.active = true;
+      #         if (Ui::ScreenReaderModeActive()) {
+      #             state.focused = true; // GATED!
+      #         }
+      #     }
+      #     // same pattern in the Filtered state
+      #
+      # NVDA's MSAA bridge needs the focused bit to be set when it
+      # queries the child after our Focus event fires. If
+      # ScreenReaderModeActive() returns false at query time (it can
+      # transiently flip during startup, or be evaluated on a thread
+      # where Qt's accessibility state lookup races our detection),
+      # the bit stays off, NVDA sees an unfocused list child, and
+      # silently drops the event.
+      #
+      # Strip the ScreenReaderModeActive() guard so the focused state
+      # is reported the same way HistoryInner reports it.
+      # ============================================
+      - name: Patch Dialogs::InnerWidget for unconditional a11y focused state
+        shell: python
+        run: |
+          import os, re
+
+          cpp = 'tdesktop/Telegram/SourceFiles/dialogs/dialogs_inner_widget.cpp'
+          if not os.path.exists(cpp):
+              print(f'WARNING: missing {cpp} — skipping dialogs a11y patch')
+              exit(0)
+
+          with open(cpp, 'r', encoding='utf-8') as f:
+              src = f.read()
+
+          if 'a11y-unconditional-focused' in src:
+              print('dialogs_inner_widget.cpp already patched')
+              exit(0)
+
+          # Match both occurrences:
+          #     if (Ui::ScreenReaderModeActive()) {
+          #         state.focused = true;
+          #     }
+          # Tolerate whitespace / Tab vs space differences.
+          pattern = re.compile(
+              r'if\s*\(\s*Ui::ScreenReaderModeActive\s*\(\s*\)\s*\)\s*\{\s*'
+              r'state\.focused\s*=\s*true\s*;\s*\}'
+          )
+          replacement = (
+              '/* a11y-unconditional-focused: removed the\n'
+              '\t\t\t   ScreenReaderModeActive() guard so NVDA reliably\n'
+              '\t\t\t   sees state.focused on the selected chat row */ '
+              'state.focused = true;'
+          )
+
+          src2, n = pattern.subn(replacement, src)
+          if n == 0:
+              print('ERROR: ScreenReaderModeActive() / state.focused '
+                    'guard not found — upstream Dialogs::InnerWidget '
+                    'may have changed shape')
+              exit(1)
+          print(f'dialogs_inner_widget.cpp patched ({n} site(s) updated)')
+
+          with open(cpp, 'w', encoding='utf-8') as f:
+              f.write(src2)
+
+      # ============================================
       # 7f. Enter activates the focused message's main content.
       #
       # When a screen-reader user has navigated to a message with the

@@ -386,6 +386,48 @@ inline void Speak(const QString &text) {
         .arg(text.left(40).replace(QChar('\n'), QChar(' '))));
 }
 
+// Speak without the LastSpokenText dedupe AND truncate very long
+// strings before handing them to nvdaController_speakText. Used for
+// the chat-list arrow handler: empirically NVDA's controllerClient
+// path returns rc=0 for any string length but the user hears nothing
+// when the payload is ~180+ chars (each row in Dialogs::InnerWidget
+// contains type + name + mute + unread count + last sender +
+// preview + direction + timestamp, easily >200 chars). Shorter
+// strings pass through; cap aggressively so we always stay under
+// whatever NVDA's internal limit turns out to be.
+inline void SpeakForced(const QString &text) {
+    EnsureLoaded();
+    if (text.isEmpty()) return;
+
+    // Truncate but keep the meaningful prefix. NVDA reads the chat
+    // title first in the lib_ui-built string, so the first ~110
+    // chars are the most informative bit.
+    QString trimmed = text;
+    constexpr int kMaxChars = 110;
+    if (trimmed.size() > kMaxChars) {
+        trimmed = trimmed.left(kMaxChars) + QStringLiteral("…");
+    }
+
+    long rc = SpeakOnce(trimmed);
+    bool reloaded = false;
+    if (rc != 0 && rc != -1) {
+        Reload();
+        reloaded = true;
+        rc = SpeakOnce(trimmed);
+    }
+    LastSpokenText() = trimmed;
+    LogLine(QStringLiteral(
+        "[nvda] speakTextForced(%1 chars, orig=%2)%3 rc=%4 "
+        "first40=\"%5\"")
+        .arg(trimmed.size())
+        .arg(text.size())
+        .arg(reloaded
+                ? QStringLiteral(" [after reload]")
+                : QString())
+        .arg(rc)
+        .arg(trimmed.left(40).replace(QChar('\n'), QChar(' '))));
+}
+
 // Startup self-test. Speaks one fixed phrase shortly after the DLL is
 // loaded. Diagnostic intent:
 //   * If the user HEARS it -> nvdaController_speakText genuinely
@@ -417,6 +459,8 @@ inline void SelfTest() {
 inline void SelfTest() {}
 
 inline void Speak(const QString &) {}
+
+inline void SpeakForced(const QString &) {}
 
 #endif // Q_OS_WIN
 
@@ -602,7 +646,23 @@ protected:
                                 // directly through NVDA Controller
                                 // Client — the documented IPC channel —
                                 // so the user actually hears it.
-                                nvda::Speak(name);
+                                //
+                                // For chats: bypass dedupe AND truncate.
+                                // The lib_ui-built chat name strings
+                                // are very long (~180-200 chars). They
+                                // come back rc=0 from speakText but
+                                // produce no audio — strongly suggests
+                                // an internal NVDA controllerClient
+                                // length limit that just drops the
+                                // call silently. Messages go through
+                                // the normal Speak() since their names
+                                // are short enough.
+                                if (type == QLatin1String(
+                                        "Dialogs::InnerWidget")) {
+                                    nvda::SpeakForced(name);
+                                } else {
+                                    nvda::Speak(name);
+                                }
                             } else {
                                 summary += QStringLiteral(
                                     " focusChild=nullptr");
@@ -624,6 +684,19 @@ protected:
         //   recording locked -> stop(true) (i.e. send)
         //   listen state    -> requestToSendWithOptions({})
         // so a single hotkey covers the whole flow.
+        // Ctrl+Shift+T — re-trigger the speech self-test on demand so
+        // the user can confirm whether NVDA's controllerClient path
+        // produces audio in the *current* application state (not just
+        // at startup). If pressing this is silent BUT NVDA reads
+        // other things, then the controller path is dead and we have
+        // to rely purely on MSAA focus events.
+        if (key == Qt::Key_T
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            nvda::SelfTest();
+            return true;
+        }
+
         if (key == Qt::Key_R
             && (mods & Qt::ControlModifier)
             && (mods & Qt::ShiftModifier)) {

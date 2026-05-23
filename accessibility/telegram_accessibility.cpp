@@ -323,25 +323,44 @@ void Install() {
         // tree before lib_ui's FocusManager has finished wiring the
         // dialogs list (ScreenReaderModeActive only just became true).
         // It then caches an empty/stale child list for Dialogs::InnerWidget
-        // and never re-reads it — the chat list goes silent under arrows.
+        // and never re-reads it — the chat list goes silent under arrows
+        // even though Focus/Selection events fire with correct child
+        // names (confirmed in tg_a11y_diag.txt / tg_widgets_log.txt).
         //
         // We can't fix this with an ObjectShow on the main window: that
         // re-walk from the window root drops NVDA's focus tracking (the
         // regression that broke even the first chat). Instead, once the
-        // list exists, fire ObjectReorder on the InnerWidget ITSELF so
+        // list exists, fire a layered burst on the InnerWidget ITSELF so
         // NVDA re-reads only that subtree, leaving the window root and
         // the focus chain untouched.
-        QTimer::singleShot(1200, qApp, [] {
+        //
+        // We retry at 1.2s / 3s / 6s because:
+        //   * dialog rows are populated asynchronously after sign-in
+        //     restore — first attempt may run while childCount is small
+        //   * NVDA does not always pick up the first burst; spacing the
+        //     bursts increases the chance one lands while NVDA is ready
+        //     to refresh its cache
+        const auto nudge = [] {
             QWidget *root = TgAccessibility::detail::FindMainWindow();
             if (!root) return;
             QWidget *list = TgAccessibility::detail::FindByType(
                 root, "Dialogs::InnerWidget");
             if (!list) return;
+            QAccessibleEvent show(list, QAccessible::ObjectShow);
+            QAccessible::updateAccessibility(&show);
             QAccessibleEvent reorder(list, QAccessible::ObjectReorder);
             QAccessible::updateAccessibility(&reorder);
-            Log(QStringLiteral("[ScreenReader] fired ObjectReorder on "
-                               "Dialogs::InnerWidget (restart nudge)"));
-        });
+            QAccessibleEvent renamed(list, QAccessible::NameChanged);
+            QAccessible::updateAccessibility(&renamed);
+            auto *iface = QAccessible::queryAccessibleInterface(list);
+            const int count = iface ? iface->childCount() : -1;
+            Log(QStringLiteral("[ScreenReader] burst (Show/Reorder/Name) "
+                               "on Dialogs::InnerWidget childCount=%1")
+                .arg(count));
+        };
+        QTimer::singleShot(1200, qApp, nudge);
+        QTimer::singleShot(3000, qApp, nudge);
+        QTimer::singleShot(6000, qApp, nudge);
     }, kScreenReaderLifetime);
 
     // Defer keyboard nav until the event loop is up and qApp / main

@@ -730,16 +730,29 @@ private:
             w->setFocusPolicy(Qt::StrongFocus);
         }
 
-        // After an app restart NVDA sometimes keeps a stale (empty) child
-        // list for this panel because it enumerated the accessibility tree
-        // before lib_ui finished wiring it. Fire a targeted ObjectReorder
-        // on the panel itself so NVDA re-reads ONLY this widget's children
-        // (e.g. the dialogs list) without disturbing the window root or
-        // the global focus chain - that is what the removed ObjectShow
-        // nudge got wrong.
+        // After an app restart NVDA sometimes keeps a stale view of this
+        // panel: it enumerated the accessibility tree before lib_ui
+        // finished wiring it (or it cached the previous session's HWND
+        // children list) and never re-reads it on its own. Confirmed
+        // empirically: arrow keys then fire the right Focus/Selection
+        // events on Dialogs::InnerWidget (childCount=41, focusChild.name
+        // is correct) but NVDA stays silent — meanwhile HistoryInner's
+        // identical event burst is announced fine.
+        //
+        // Fire a layered burst on THIS panel only (not the window root,
+        // which is what broke focus tracking previously). Each event
+        // invalidates a different layer of NVDA's cache:
+        //   ObjectShow    — tells NVDA the widget exists now / is visible
+        //   ObjectReorder — tells NVDA its child list changed
+        //   NameChanged   — tells NVDA to re-read the panel name
+        //   Focus (later) — sent by setFocus + manual event below
         {
+            QAccessibleEvent show(w, QAccessible::ObjectShow);
+            QAccessible::updateAccessibility(&show);
             QAccessibleEvent reorder(w, QAccessible::ObjectReorder);
             QAccessible::updateAccessibility(&reorder);
+            QAccessibleEvent renamed(w, QAccessible::NameChanged);
+            QAccessible::updateAccessibility(&renamed);
         }
 
         w->setFocus(Qt::ShortcutFocusReason);

@@ -1044,7 +1044,7 @@ jobs:
                   exit(1)
 
           # The Qt/NVDA focus-child path can stay pinned to the first chat
-          # even while Telegram's own selection moves correctly. Speak from
+          # even while Telegram's own selection moves correctly. Announce from
           # announceSelectedFocus(), where Dialogs::InnerWidget has just
           # computed the real selected index, instead of querying it back
           # from the accessibility tree after the fact.
@@ -1056,8 +1056,39 @@ jobs:
               '\n\t\t\t// a11y-direct-nvda-chat-speech: use the real'
               '\n\t\t\t// Dialogs::InnerWidget selection index, not'
               '\n\t\t\t// NVDA/Qt focusChild(), which may be stale.'
-              '\n\t\t\tTgAccessibility::nvda::SpeakForced('
-              'accessibilityChildName(index));'
+              '\n\t\t\tconst auto a11yChatName ='
+              '\n\t\t\t\taccessibilityChildName(index).simplified();'
+              '\n\t\t\tif (!a11yChatName.isEmpty()) {'
+              '\n\t\t\t\tsetAccessibleName(a11yChatName);'
+              '\n\t\t\t\tQAccessibleEvent nameChanged('
+              '\n\t\t\t\t\tthis, QAccessible::NameChanged);'
+              '\n\t\t\t\tQAccessible::updateAccessibility(&nameChanged);'
+              '\n\t\t\t\tQAccessibleEvent parentFocus('
+              '\n\t\t\t\t\tthis, QAccessible::Focus);'
+              '\n\t\t\t\tQAccessible::updateAccessibility(&parentFocus);'
+              '\n\t\t\t\tTgAccessibility::LogLine(QStringLiteral('
+              '\n\t\t\t\t\t"[dialogs] direct announce immediate \"%1\"")'
+              '\n\t\t\t\t\t.arg(a11yChatName.left(40)));'
+              '\n\t\t\t\tstatic int a11ySpeechGeneration = 0;'
+              '\n\t\t\t\tconst int a11yThisSpeech = ++a11ySpeechGeneration;'
+              '\n\t\t\t\tQTimer::singleShot(180, this, ['
+              '\n\t\t\t\t\tthis, a11yChatName, a11yThisSpeech] {'
+              '\n\t\t\t\t\tif (a11yThisSpeech != a11ySpeechGeneration) {'
+              '\n\t\t\t\t\t\treturn;'
+              '\n\t\t\t\t\t}'
+              '\n\t\t\t\t\tsetAccessibleName(a11yChatName);'
+              '\n\t\t\t\t\tTgAccessibility::nvda::SpeakForced(a11yChatName);'
+              '\n\t\t\t\t\tQAccessibleEvent delayedNameChanged('
+              '\n\t\t\t\t\t\tthis, QAccessible::NameChanged);'
+              '\n\t\t\t\t\tQAccessible::updateAccessibility(&delayedNameChanged);'
+              '\n\t\t\t\t\tQAccessibleEvent delayedFocus('
+              '\n\t\t\t\t\t\tthis, QAccessible::Focus);'
+              '\n\t\t\t\t\tQAccessible::updateAccessibility(&delayedFocus);'
+              '\n\t\t\t\t\tTgAccessibility::LogLine(QStringLiteral('
+              '\n\t\t\t\t\t\t"[dialogs] direct announce delayed \"%1\"")'
+              '\n\t\t\t\t\t\t.arg(a11yChatName.left(40)));'
+              '\n\t\t\t\t});'
+              '\n\t\t\t}'
           )
           src2, direct_count = direct_pattern.subn(
               direct_replacement,

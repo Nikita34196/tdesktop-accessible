@@ -813,6 +813,36 @@ jobs:
               '\tconst int previousIndex = lastFocusedChild.value(this, -1);\n'
               '\tlastFocusedChild.insert(this, index);\n'
               '\n'
+              '\t// CRITICAL: drop the cached Accessible::Item for the\n'
+              '\t// previous AND new index. lib_ui caches one Item (one\n'
+              '\t// MSAA IAccessible cookie) per child index for the\n'
+              '\t// lifetime of the widget. NVDA dedupes consecutive\n'
+              '\t// "focus gained" events that resolve to the same\n'
+              '\t// IAccessible pointer, which is why arrow keys after\n'
+              '\t// the first one were silent even though our state +\n'
+              '\t// focusChild() were correct (NVDA+Shift+M did speak\n'
+              '\t// the new chat because it queried the focused object\n'
+              '\t// fresh). UniqueId\'s destructor calls\n'
+              '\t// QAccessible::deleteAccessibleInterface so move-\n'
+              '\t// assigning a default UniqueId both destroys the old\n'
+              '\t// Item and frees its MSAA cookie. Next call to\n'
+              '\t// accessibilityChildInterface(i) creates a brand-new\n'
+              '\t// Item with a fresh cookie — NVDA sees a genuinely\n'
+              '\t// different focused object and announces it.\n'
+              '\t{\n'
+              '\t\tauto &cacheList = accessibleItems().list;\n'
+              '\t\tconst int sz = int(cacheList.size());\n'
+              '\t\tif (index >= 0 && index < sz && cacheList[index]) {\n'
+              '\t\t\tcacheList[index] = Accessible::UniqueId();\n'
+              '\t\t}\n'
+              '\t\tif (previousIndex >= 0\n'
+              '\t\t\t\t&& previousIndex != index\n'
+              '\t\t\t\t&& previousIndex < sz\n'
+              '\t\t\t\t&& cacheList[previousIndex]) {\n'
+              '\t\t\tcacheList[previousIndex] = Accessible::UniqueId();\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\n'
               '\tif (previousIndex >= 0 && previousIndex != index) {\n'
               '\t\tauto lostState = QAccessible::State();\n'
               '\t\tlostState.focused = true;\n'
@@ -894,8 +924,8 @@ jobs:
           print('lib_ui rp_widget.cpp patched (extra a11y events)')
 
       # ============================================
-      # 7g. Make Dialogs::InnerWidget report state.focused = true
-      #     UNCONDITIONALLY for the currently-selected chat row.
+      # 7g. Make Dialogs::InnerWidget report focusable/focused state
+      #     UNCONDITIONALLY for chat rows.
       #
       # The chat list was silent under arrow navigation despite our
       # patched accessibilityChildFocused firing Focus + Selection +
@@ -908,11 +938,15 @@ jobs:
       #
       #   HistoryInner::accessibilityChildState():
       #     if (index == _accessibilityFocusedIndex) {
+      #         state.focusable = true;   // unconditional
       #         state.focused = true;     // unconditional
       #         state.active = true;
       #     }
       #
       #   Dialogs::InnerWidget::accessibilityChildState():
+      #     if (Ui::ScreenReaderModeActive()) {
+      #         state.focusable = true;   // GATED!
+      #     }
       #     if (it->get() == _selected) {
       #         state.selected = true;
       #         state.active = true;
@@ -922,18 +956,18 @@ jobs:
       #     }
       #     // same pattern in the Filtered state
       #
-      # NVDA's MSAA bridge needs the focused bit to be set when it
-      # queries the child after our Focus event fires. If
+      # NVDA's MSAA bridge needs the focusable and focused bits to be
+      # set when it queries the child after our Focus event fires. If
       # ScreenReaderModeActive() returns false at query time (it can
       # transiently flip during startup, or be evaluated on a thread
       # where Qt's accessibility state lookup races our detection),
-      # the bit stays off, NVDA sees an unfocused list child, and
-      # silently drops the event.
+      # one of those bits stays off, NVDA sees a selected-but-not-
+      # focusable/focused list child, and silently drops the event.
       #
-      # Strip the ScreenReaderModeActive() guard so the focused state
-      # is reported the same way HistoryInner reports it.
+      # Strip the ScreenReaderModeActive() guards so Dialogs::InnerWidget
+      # reports list-item focus the same way HistoryInner reports it.
       # ============================================
-      - name: Patch Dialogs::InnerWidget for unconditional a11y focused state
+      - name: Patch Dialogs::InnerWidget for unconditional a11y focus state
         shell: python
         run: |
           import os, re
@@ -946,9 +980,34 @@ jobs:
           with open(cpp, 'r', encoding='utf-8') as f:
               src = f.read()
 
-          if 'a11y-unconditional-focused' in src:
+          if ('a11y-unconditional-focusable' in src
+                  and 'a11y-unconditional-focused' in src
+                  and 'a11y-direct-nvda-chat-speech' in src):
               print('dialogs_inner_widget.cpp already patched')
               exit(0)
+
+          # The child item has to be focusable even if screen-reader mode
+          # is still racing to true; otherwise NVDA may discard the child
+          # focus event before it ever queries state.focused.
+          focusable_pattern = re.compile(
+              r'if\s*\(\s*Ui::ScreenReaderModeActive\s*\(\s*\)\s*\)\s*\{\s*'
+              r'state\.focusable\s*=\s*true\s*;\s*\}'
+          )
+          focusable_replacement = (
+              '/* a11y-unconditional-focusable: removed the\n'
+              '\t   ScreenReaderModeActive() guard so NVDA treats chat\n'
+              '\t   rows as focusable whenever it handles child focus */\\n'
+              '\tstate.focusable = true;'
+          )
+          src2, focusable_count = focusable_pattern.subn(
+              focusable_replacement,
+              src,
+              count=1)
+          if focusable_count == 0:
+              print('ERROR: ScreenReaderModeActive() / state.focusable '
+                    'guard not found — upstream Dialogs::InnerWidget '
+                    'may have changed shape')
+              exit(1)
 
           # Match both occurrences:
           #     if (Ui::ScreenReaderModeActive()) {
@@ -966,13 +1025,51 @@ jobs:
               'state.focused = true;'
           )
 
-          src2, n = pattern.subn(replacement, src)
+          src2, n = pattern.subn(replacement, src2)
           if n == 0:
               print('ERROR: ScreenReaderModeActive() / state.focused '
                     'guard not found — upstream Dialogs::InnerWidget '
                     'may have changed shape')
               exit(1)
-          print(f'dialogs_inner_widget.cpp patched ({n} site(s) updated)')
+          if 'telegram_accessibility_keyboard.h' not in src2:
+              src2, include_count = re.subn(
+                  r'(#include\s+"ui/screen_reader_mode\.h"\s*\n)',
+                  lambda m: m.group(1)
+                      + '#include "ui/accessibility/telegram_accessibility_keyboard.h"\n',
+                  src2,
+                  count=1)
+              if include_count == 0:
+                  print('ERROR: ui/screen_reader_mode.h include not found '
+                        '— cannot include NVDA speech helper')
+                  exit(1)
+
+          # The Qt/NVDA focus-child path can stay pinned to the first chat
+          # even while Telegram's own selection moves correctly. Speak from
+          # announceSelectedFocus(), where Dialogs::InnerWidget has just
+          # computed the real selected index, instead of querying it back
+          # from the accessibility tree after the fact.
+          direct_pattern = re.compile(
+              r'(accessibilityChildFocused\s*\(\s*index\s*\)\s*;)'
+          )
+          direct_replacement = (
+              r'\1'
+              '\n\t\t\t// a11y-direct-nvda-chat-speech: use the real'
+              '\n\t\t\t// Dialogs::InnerWidget selection index, not'
+              '\n\t\t\t// NVDA/Qt focusChild(), which may be stale.'
+              '\n\t\t\tTgAccessibility::nvda::SpeakForced('
+              'accessibilityChildName(index));'
+          )
+          src2, direct_count = direct_pattern.subn(
+              direct_replacement,
+              src2)
+          if direct_count < 2:
+              print('ERROR: accessibilityChildFocused(index) call sites '
+                    'not found in announceSelectedFocus — upstream '
+                    'Dialogs::InnerWidget may have changed shape')
+              exit(1)
+          print('dialogs_inner_widget.cpp patched '
+                f'({focusable_count} focusable + {n} focused + '
+                f'{direct_count} direct speech site(s) updated)')
 
           with open(cpp, 'w', encoding='utf-8') as f:
               f.write(src2)

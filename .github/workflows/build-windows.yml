@@ -951,7 +951,8 @@ jobs:
               src = f.read()
 
           if ('a11y-unconditional-focusable' in src
-                  and 'a11y-unconditional-focused' in src):
+                  and 'a11y-unconditional-focused' in src
+                  and 'a11y-direct-nvda-chat-speech' in src):
               print('dialogs_inner_widget.cpp already patched')
               exit(0)
 
@@ -1000,8 +1001,45 @@ jobs:
                     'guard not found — upstream Dialogs::InnerWidget '
                     'may have changed shape')
               exit(1)
+          if 'telegram_accessibility_keyboard.h' not in src2:
+              src2, include_count = re.subn(
+                  r'(#include\s+"ui/screen_reader_mode\.h"\s*\n)',
+                  lambda m: m.group(1)
+                      + '#include "ui/accessibility/telegram_accessibility_keyboard.h"\n',
+                  src2,
+                  count=1)
+              if include_count == 0:
+                  print('ERROR: ui/screen_reader_mode.h include not found '
+                        '— cannot include NVDA speech helper')
+                  exit(1)
+
+          # The Qt/NVDA focus-child path can stay pinned to the first chat
+          # even while Telegram's own selection moves correctly. Speak from
+          # announceSelectedFocus(), where Dialogs::InnerWidget has just
+          # computed the real selected index, instead of querying it back
+          # from the accessibility tree after the fact.
+          direct_pattern = re.compile(
+              r'(accessibilityChildFocused\s*\(\s*index\s*\)\s*;)'
+          )
+          direct_replacement = (
+              r'\1'
+              '\n\t\t\t// a11y-direct-nvda-chat-speech: use the real'
+              '\n\t\t\t// Dialogs::InnerWidget selection index, not'
+              '\n\t\t\t// NVDA/Qt focusChild(), which may be stale.'
+              '\n\t\t\tTgAccessibility::nvda::SpeakForced('
+              'accessibilityChildName(index));'
+          )
+          src2, direct_count = direct_pattern.subn(
+              direct_replacement,
+              src2)
+          if direct_count < 2:
+              print('ERROR: accessibilityChildFocused(index) call sites '
+                    'not found in announceSelectedFocus — upstream '
+                    'Dialogs::InnerWidget may have changed shape')
+              exit(1)
           print('dialogs_inner_widget.cpp patched '
-                f'({focusable_count} focusable + {n} focused site(s) updated)')
+                f'({focusable_count} focusable + {n} focused + '
+                f'{direct_count} direct speech site(s) updated)')
 
           with open(cpp, 'w', encoding='utf-8') as f:
               f.write(src2)

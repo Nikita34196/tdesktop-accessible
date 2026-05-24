@@ -699,6 +699,38 @@ protected:
                                 if (type == QLatin1String(
                                         "Dialogs::InnerWidget")) {
                                     nvda::SpeakForced(name);
+
+                                    // Last resort: smuggle the chat name
+                                    // into NVDA via the focused widget's
+                                    // OWN accessible name + a NameChanged
+                                    // event. NVDA reliably re-reads the
+                                    // focused widget's name when it sees
+                                    // EVENT_OBJECT_NAMECHANGE on it — this
+                                    // bypasses both the dead controller
+                                    // client and the child-id dedup that
+                                    // suppresses our per-row Focus events
+                                    // in the chat list. We confirmed the
+                                    // path works for HistoryInner via
+                                    // MSAA focus, and that NVDA+Shift+M
+                                    // can read the chat list focus,
+                                    // meaning NVDA has the data — it just
+                                    // refuses to auto-announce child-id
+                                    // changes on Dialogs::InnerWidget.
+                                    // NameChanged on the focused parent
+                                    // is the one event NVDA can\'t dedup
+                                    // away, since each new chat name is
+                                    // a fresh string.
+                                    QString shortName = name;
+                                    constexpr int kMax = 110;
+                                    if (shortName.size() > kMax) {
+                                        shortName = shortName.left(kMax)
+                                            + QStringLiteral("…");
+                                    }
+                                    alive->setAccessibleName(shortName);
+                                    QAccessibleEvent nameEv(alive.data(),
+                                        QAccessible::NameChanged);
+                                    QAccessible::updateAccessibility(
+                                        &nameEv);
                                 } else {
                                     nvda::Speak(name);
                                 }

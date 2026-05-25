@@ -1143,7 +1143,40 @@ jobs:
               h = f.read()
 
           if 'a11yActivateFocused' in h:
-              print('history_inner_widget.h already patched (Enter-activate)')
+              changed_h = False
+              if 'a11yMoveFocusedLink' not in h:
+                  h, n = re.subn(
+                      r'(void\s+a11yActivateFocused\s*\(\s*\)\s*;)',
+                      lambda m: m.group(1)
+                          + '\n\tbool a11yActivateFocusedLink();'
+                          + '\n\tvoid a11yMoveFocusedLink(int delta);'
+                          + '\n\tstd::vector<ClickHandlerPtr> a11yCollectFocusedLinks();'
+                          + '\n\tQString a11yFocusedLinkLabel(int index, int total) const;',
+                      h,
+                      count=1)
+                  if n == 0:
+                      print('ERROR: a11yActivateFocused declaration landmark not found')
+                      exit(1)
+                  changed_h = True
+              if '_a11yFocusedLinks' not in h:
+                  h, n = re.subn(
+                      r'(mutable std::vector<HistoryView::MessageSubItem>\s+_activeColumns\s*;)',
+                      lambda m: m.group(1)
+                          + '\n\tint _a11yFocusedLinkIndex = -1;'
+                          + '\n\tHistoryItem *_a11yFocusedLinksItem = nullptr;'
+                          + '\n\tstd::vector<ClickHandlerPtr> _a11yFocusedLinks;',
+                      h,
+                      count=1)
+                  if n == 0:
+                      print('ERROR: _activeColumns landmark not found in .h')
+                      exit(1)
+                  changed_h = True
+              if changed_h:
+                  with open(h_path, 'w', encoding='utf-8') as f:
+                      f.write(h)
+                  print('history_inner_widget.h extended (link navigation)')
+              else:
+                  print('history_inner_widget.h already patched (Enter/link-activate)')
           else:
               # Inject right after the accessibilityChildSubItemValue
               # declaration — keeps it inside the same accessibility block.
@@ -1151,32 +1184,76 @@ jobs:
                   r'(QString\s+accessibilityChildSubItemValue\s*\(\s*'
                   r'int\s+row\s*,\s*int\s+column\s*\)\s*const\s+override\s*;)',
                   lambda m: m.group(1)
-                      + '\n\tvoid a11yActivateFocused();',
+                      + '\n\tvoid a11yActivateFocused();'
+                      + '\n\tbool a11yActivateFocusedLink();'
+                      + '\n\tvoid a11yMoveFocusedLink(int delta);'
+                      + '\n\tstd::vector<ClickHandlerPtr> a11yCollectFocusedLinks();'
+                      + '\n\tQString a11yFocusedLinkLabel(int index, int total) const;',
                   h,
                   count=1)
               if n == 0:
                   print('ERROR: accessibilityChildSubItemValue landmark '
                         'not found in .h')
                   exit(1)
+              h, n_fields = re.subn(
+                  r'(mutable std::vector<HistoryView::MessageSubItem>\s+_activeColumns\s*;)',
+                  lambda m: m.group(1)
+                      + '\n\tint _a11yFocusedLinkIndex = -1;'
+                      + '\n\tHistoryItem *_a11yFocusedLinksItem = nullptr;'
+                      + '\n\tstd::vector<ClickHandlerPtr> _a11yFocusedLinks;',
+                  h,
+                  count=1)
+              if n_fields == 0:
+                  print('ERROR: _activeColumns landmark not found in .h')
+                  exit(1)
               with open(h_path, 'w', encoding='utf-8') as f:
                   f.write(h)
-              print('history_inner_widget.h patched (Enter-activate)')
+              print('history_inner_widget.h patched (Enter/link-activate)')
 
           with open(cpp_path, 'r', encoding='utf-8') as f:
               cpp = f.read()
 
-          if 'a11yActivateFocused' in cpp:
-              print('history_inner_widget.cpp already patched (Enter-activate)')
+          if 'a11yCollectFocusedLinks' in cpp:
+              print('history_inner_widget.cpp already patched (Enter/link-activate)')
               exit(0)
 
-          # Inject the Enter/Return handler just before the existing
+          if 'telegram_accessibility_keyboard.h' not in cpp:
+              cpp, n_inc = re.subn(
+                  r'(#include\s+"history/history_inner_widget_accessibility\.h"\s*\n)',
+                  lambda m: m.group(1)
+                      + '#include "ui/accessibility/telegram_accessibility_keyboard.h"\n',
+                  cpp,
+                  count=1)
+              if n_inc == 0:
+                  print('ERROR: history_inner_widget_accessibility.h include not found')
+                  exit(1)
+
+          # Inject the Tab / Enter / Return handler just before the existing
           # Space handler inside keyPressEvent's `if (count > 0)` block,
           # so it sits in exactly the same screen-reader navigation
           # context as Space.
           key_inject = (
-              'if (e->key() == Qt::Key_Return\n'
+              'if (e->key() == Qt::Key_Tab\n'
+              '\t\t\t&& !(e->modifiers() & ~Qt::ShiftModifier)) {\n'
+              '\t\t\ta11yMoveFocusedLink(\n'
+              '\t\t\t\t(e->modifiers() & Qt::ShiftModifier) ? -1 : 1);\n'
+              '\t\t\te->accept();\n'
+              '\t\t\treturn;\n'
+              '\t\t}\n'
+              '\t\tif ((e->key() == Qt::Key_Right\n'
+              '\t\t\t\t|| e->key() == Qt::Key_Left)\n'
+              '\t\t\t&& (e->modifiers() & Qt::ControlModifier)\n'
+              '\t\t\t&& !(e->modifiers() & ~(Qt::ControlModifier | Qt::ShiftModifier))) {\n'
+              '\t\t\ta11yMoveFocusedLink(\n'
+              '\t\t\t\t(e->key() == Qt::Key_Left) ? -1 : 1);\n'
+              '\t\t\te->accept();\n'
+              '\t\t\treturn;\n'
+              '\t\t}\n'
+              '\t\tif (e->key() == Qt::Key_Return\n'
               '\t\t\t|| e->key() == Qt::Key_Enter) {\n'
-              '\t\t\ta11yActivateFocused();\n'
+              '\t\t\tif (!a11yActivateFocusedLink()) {\n'
+              '\t\t\t\ta11yActivateFocused();\n'
+              '\t\t\t}\n'
               '\t\t\te->accept();\n'
               '\t\t\treturn;\n'
               '\t\t}\n'
@@ -1198,10 +1275,141 @@ jobs:
           # all already used by mouseActionFinish in this file.
           impl = (
               '\n'
-              '// === Enter-to-activate (added by accessibility-patch) ===\n'
+              '// === Enter/link a11y navigation (added by accessibility-patch) ===\n'
+              'std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {\n'
+              '\t_a11yFocusedLinks.clear();\n'
+              '\tif (!_accessibilityFocusedItem) {\n'
+              '\t\t_a11yFocusedLinkIndex = -1;\n'
+              '\t\t_a11yFocusedLinksItem = nullptr;\n'
+              '\t\treturn _a11yFocusedLinks;\n'
+              '\t}\n'
+              '\tif (_a11yFocusedLinksItem != _accessibilityFocusedItem) {\n'
+              '\t\t_a11yFocusedLinksItem = _accessibilityFocusedItem;\n'
+              '\t\t_a11yFocusedLinkIndex = -1;\n'
+              '\t}\n'
+              '\tconst auto view = viewByItem(_accessibilityFocusedItem);\n'
+              '\tif (!view) {\n'
+              '\t\t_a11yFocusedLinkIndex = -1;\n'
+              '\t\treturn _a11yFocusedLinks;\n'
+              '\t}\n'
+              '\tconst auto top = itemTop(view);\n'
+              '\tif (top < 0) {\n'
+              '\t\t_a11yFocusedLinkIndex = -1;\n'
+              '\t\treturn _a11yFocusedLinks;\n'
+              '\t}\n'
+              '\tauto request = StateRequest();\n'
+              '\tconst auto add = [&](const ClickHandlerPtr &link) {\n'
+              '\t\tif (!link) return;\n'
+              '\t\tif (std::find(_a11yFocusedLinks.begin(),\n'
+              '\t\t\t\t_a11yFocusedLinks.end(), link)\n'
+              '\t\t\t!= _a11yFocusedLinks.end()) {\n'
+              '\t\t\treturn;\n'
+              '\t\t}\n'
+              '\t\t_a11yFocusedLinks.push_back(link);\n'
+              '\t};\n'
+              '\tconst auto scan = [&](QPoint widgetPoint) {\n'
+              '\t\tconst auto itemPoint = mapPointToItem(widgetPoint, view);\n'
+              '\t\tconst auto state = view->textState(itemPoint, request);\n'
+              '\t\tadd(state.link);\n'
+              '\t};\n'
+              '\tconst auto itemHeight = view->height();\n'
+              '\tconst auto stepY = std::max(8, itemHeight / 12);\n'
+              '\tconst auto stepX = std::max(16, width() / 8);\n'
+              '\tfor (auto y = top + 4; y < top + itemHeight; y += stepY) {\n'
+              '\t\tfor (auto x = 4; x < width(); x += stepX) {\n'
+              '\t\t\tscan(QPoint(x, y));\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\tfor (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {\n'
+              '\t\tscan(QPoint(width() / 2, top + int(itemHeight * frac)));\n'
+              '\t}\n'
+              '\tif (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {\n'
+              '\t\t_a11yFocusedLinkIndex = -1;\n'
+              '\t}\n'
+              '\treturn _a11yFocusedLinks;\n'
+              '}\n'
+              '\n'
+              'QString HistoryInner::a11yFocusedLinkLabel(int index, int total) const {\n'
+              '\tauto result = QStringLiteral("Объект %1 из %2").arg(index + 1).arg(total);\n'
+              '\tif (index < 0 || index >= int(_a11yFocusedLinks.size())) {\n'
+              '\t\treturn result;\n'
+              '\t}\n'
+              '\tconst auto &link = _a11yFocusedLinks[index];\n'
+              '\tQString detail;\n'
+              '\tif (link) {\n'
+              '\t\tdetail = link->tooltip();\n'
+              '\t\tif (detail.isEmpty()) detail = link->url();\n'
+              '\t\tif (detail.isEmpty()) detail = link->copyToClipboardText();\n'
+              '\t\tif (detail.isEmpty()) detail = link->dragText();\n'
+              '\t}\n'
+              '\tdetail = detail.simplified();\n'
+              '\tif (!detail.isEmpty()) {\n'
+              '\t\tresult += QStringLiteral(": ") + detail.left(120);\n'
+              '\t}\n'
+              '\treturn result;\n'
+              '}\n'
+              '\n'
+              'void HistoryInner::a11yMoveFocusedLink(int delta) {\n'
+              '\tconst auto links = a11yCollectFocusedLinks();\n'
+              '\tconst auto total = int(links.size());\n'
+              '\tif (total <= 0) {\n'
+              '\t\tTgAccessibility::nvda::SpeakForced(QStringLiteral("В сообщении нет ссылок или вложений"));\n'
+              '\t\tTgAccessibility::LogLine(QStringLiteral("[messages] no links in focused message"));\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tif (_a11yFocusedLinkIndex < 0) {\n'
+              '\t\t_a11yFocusedLinkIndex = (delta < 0) ? (total - 1) : 0;\n'
+              '\t} else {\n'
+              '\t\t_a11yFocusedLinkIndex = (_a11yFocusedLinkIndex + delta + total) % total;\n'
+              '\t}\n'
+              '\tconst auto label = a11yFocusedLinkLabel(_a11yFocusedLinkIndex, total);\n'
+              '\tTgAccessibility::nvda::SpeakForced(label);\n'
+              '\tTgAccessibility::LogLine(QStringLiteral("[messages] focused link %1").arg(label.left(80)));\n'
+              '}\n'
+              '\n'
+              'bool HistoryInner::a11yActivateFocusedLink() {\n'
+              '\tconst auto links = a11yCollectFocusedLinks();\n'
+              '\tif (_a11yFocusedLinkIndex < 0\n'
+              '\t\t\t|| _a11yFocusedLinkIndex >= int(links.size())) {\n'
+              '\t\treturn false;\n'
+              '\t}\n'
+              '\tconst auto link = links[_a11yFocusedLinkIndex];\n'
+              '\tif (!link || !_accessibilityFocusedItem) {\n'
+              '\t\treturn false;\n'
+              '\t}\n'
+              '\tActivateClickHandler(\n'
+              '\t\twindow(),\n'
+              '\t\tlink,\n'
+              '\t\tprepareClickContext(\n'
+              '\t\t\tQt::LeftButton,\n'
+              '\t\t\t_accessibilityFocusedItem->fullId()));\n'
+              '\treturn true;\n'
+              '}\n'
+              '\n'
               'void HistoryInner::a11yActivateFocused() {\n'
               '\tif (!_accessibilityFocusedItem) {\n'
               '\t\treturn;\n'
+              '\t}\n'
+              '\tconst auto item = _accessibilityFocusedItem;\n'
+              '\tif (const auto media = item->media()) {\n'
+              '\t\tif (const auto document = media->document()) {\n'
+              '\t\t\tif (document->isVoiceMessage()\n'
+              '\t\t\t\t\t|| document->isSong()\n'
+              '\t\t\t\t\t|| document->isAudioFile()\n'
+              '\t\t\t\t\t|| document->isVideoMessage()) {\n'
+              '\t\t\t\tplayPauseFocusedMedia();\n'
+              '\t\t\t\treturn;\n'
+              '\t\t\t}\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\tconst auto links = a11yCollectFocusedLinks();\n'
+              '\tif (!links.empty()) {\n'
+              '\t\tif (_a11yFocusedLinkIndex < 0) {\n'
+              '\t\t\t_a11yFocusedLinkIndex = 0;\n'
+              '\t\t}\n'
+              '\t\tif (a11yActivateFocusedLink()) {\n'
+              '\t\t\treturn;\n'
+              '\t\t}\n'
               '\t}\n'
               '\tconst auto view = viewByItem(_accessibilityFocusedItem);\n'
               '\tif (!view) {\n'

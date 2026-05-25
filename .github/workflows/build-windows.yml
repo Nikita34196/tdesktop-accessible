@@ -1269,6 +1269,27 @@ jobs:
               print('ERROR: Key_Space handler landmark not found in .cpp')
               exit(1)
 
+          cpp, n_tab_hook = re.subn(
+              r'(bool\s+HistoryInner::eventHook\s*\(\s*QEvent\s*\*\s*e\s*\)\s*\{\n)',
+              lambda m: m.group(1)
+                  + '\t// a11y-link-tab-eventhook: catch Tab before Qt focus traversal.\n'
+                  + '\tif (e->type() == QEvent::KeyPress) {\n'
+                  + '\t\tauto *key = static_cast<QKeyEvent*>(e);\n'
+                  + '\t\tif (key->key() == Qt::Key_Tab\n'
+                  + '\t\t\t\t&& !(key->modifiers() & ~Qt::ShiftModifier)\n'
+                  + '\t\t\t\t&& accessibilityChildCount() > 0) {\n'
+                  + '\t\t\ta11yMoveFocusedLink(\n'
+                  + '\t\t\t\t(key->modifiers() & Qt::ShiftModifier) ? -1 : 1);\n'
+                  + '\t\t\tkey->accept();\n'
+                  + '\t\t\treturn true;\n'
+                  + '\t\t}\n'
+                  + '\t}\n',
+              cpp,
+              count=1)
+          if n_tab_hook == 0:
+              print('ERROR: HistoryInner::eventHook landmark not found in .cpp')
+              exit(1)
+
           # Append the implementation. Same translation unit as the
           # ActivateClickHandler / textState / viewByItem / itemTop /
           # mapPointToItem / prepareClickContext helpers it relies on,

@@ -813,36 +813,6 @@ jobs:
               '\tconst int previousIndex = lastFocusedChild.value(this, -1);\n'
               '\tlastFocusedChild.insert(this, index);\n'
               '\n'
-              '\t// CRITICAL: drop the cached Accessible::Item for the\n'
-              '\t// previous AND new index. lib_ui caches one Item (one\n'
-              '\t// MSAA IAccessible cookie) per child index for the\n'
-              '\t// lifetime of the widget. NVDA dedupes consecutive\n'
-              '\t// "focus gained" events that resolve to the same\n'
-              '\t// IAccessible pointer, which is why arrow keys after\n'
-              '\t// the first one were silent even though our state +\n'
-              '\t// focusChild() were correct (NVDA+Shift+M did speak\n'
-              '\t// the new chat because it queried the focused object\n'
-              '\t// fresh). UniqueId\'s destructor calls\n'
-              '\t// QAccessible::deleteAccessibleInterface so move-\n'
-              '\t// assigning a default UniqueId both destroys the old\n'
-              '\t// Item and frees its MSAA cookie. Next call to\n'
-              '\t// accessibilityChildInterface(i) creates a brand-new\n'
-              '\t// Item with a fresh cookie — NVDA sees a genuinely\n'
-              '\t// different focused object and announces it.\n'
-              '\t{\n'
-              '\t\tauto &cacheList = accessibleItems().list;\n'
-              '\t\tconst int sz = int(cacheList.size());\n'
-              '\t\tif (index >= 0 && index < sz && cacheList[index]) {\n'
-              '\t\t\tcacheList[index] = Accessible::UniqueId();\n'
-              '\t\t}\n'
-              '\t\tif (previousIndex >= 0\n'
-              '\t\t\t\t&& previousIndex != index\n'
-              '\t\t\t\t&& previousIndex < sz\n'
-              '\t\t\t\t&& cacheList[previousIndex]) {\n'
-              '\t\t\tcacheList[previousIndex] = Accessible::UniqueId();\n'
-              '\t\t}\n'
-              '\t}\n'
-              '\n'
               '\tif (previousIndex >= 0 && previousIndex != index) {\n'
               '\t\tauto lostState = QAccessible::State();\n'
               '\t\tlostState.focused = true;\n'
@@ -924,8 +894,8 @@ jobs:
           print('lib_ui rp_widget.cpp patched (extra a11y events)')
 
       # ============================================
-      # 7g. Make Dialogs::InnerWidget report focusable/focused state
-      #     UNCONDITIONALLY for chat rows.
+      # 7g. Make Dialogs::InnerWidget report state.focused = true
+      #     UNCONDITIONALLY for the currently-selected chat row.
       #
       # The chat list was silent under arrow navigation despite our
       # patched accessibilityChildFocused firing Focus + Selection +
@@ -938,15 +908,11 @@ jobs:
       #
       #   HistoryInner::accessibilityChildState():
       #     if (index == _accessibilityFocusedIndex) {
-      #         state.focusable = true;   // unconditional
       #         state.focused = true;     // unconditional
       #         state.active = true;
       #     }
       #
       #   Dialogs::InnerWidget::accessibilityChildState():
-      #     if (Ui::ScreenReaderModeActive()) {
-      #         state.focusable = true;   // GATED!
-      #     }
       #     if (it->get() == _selected) {
       #         state.selected = true;
       #         state.active = true;
@@ -956,18 +922,18 @@ jobs:
       #     }
       #     // same pattern in the Filtered state
       #
-      # NVDA's MSAA bridge needs the focusable and focused bits to be
-      # set when it queries the child after our Focus event fires. If
+      # NVDA's MSAA bridge needs the focused bit to be set when it
+      # queries the child after our Focus event fires. If
       # ScreenReaderModeActive() returns false at query time (it can
       # transiently flip during startup, or be evaluated on a thread
       # where Qt's accessibility state lookup races our detection),
-      # one of those bits stays off, NVDA sees a selected-but-not-
-      # focusable/focused list child, and silently drops the event.
+      # the bit stays off, NVDA sees an unfocused list child, and
+      # silently drops the event.
       #
-      # Strip the ScreenReaderModeActive() guards so Dialogs::InnerWidget
-      # reports list-item focus the same way HistoryInner reports it.
+      # Strip the ScreenReaderModeActive() guard so the focused state
+      # is reported the same way HistoryInner reports it.
       # ============================================
-      - name: Patch Dialogs::InnerWidget for unconditional a11y focus state
+      - name: Patch Dialogs::InnerWidget for unconditional a11y focused state
         shell: python
         run: |
           import os, re
@@ -980,34 +946,9 @@ jobs:
           with open(cpp, 'r', encoding='utf-8') as f:
               src = f.read()
 
-          if ('a11y-unconditional-focusable' in src
-                  and 'a11y-unconditional-focused' in src
-                  and 'a11y-direct-nvda-chat-speech' in src):
+          if 'a11y-unconditional-focused' in src:
               print('dialogs_inner_widget.cpp already patched')
               exit(0)
-
-          # The child item has to be focusable even if screen-reader mode
-          # is still racing to true; otherwise NVDA may discard the child
-          # focus event before it ever queries state.focused.
-          focusable_pattern = re.compile(
-              r'if\s*\(\s*Ui::ScreenReaderModeActive\s*\(\s*\)\s*\)\s*\{\s*'
-              r'state\.focusable\s*=\s*true\s*;\s*\}'
-          )
-          focusable_replacement = (
-              '/* a11y-unconditional-focusable: removed the\n'
-              '\t   ScreenReaderModeActive() guard so NVDA treats chat\n'
-              '\t   rows as focusable whenever it handles child focus */\\n'
-              '\tstate.focusable = true;'
-          )
-          src2, focusable_count = focusable_pattern.subn(
-              focusable_replacement,
-              src,
-              count=1)
-          if focusable_count == 0:
-              print('ERROR: ScreenReaderModeActive() / state.focusable '
-                    'guard not found — upstream Dialogs::InnerWidget '
-                    'may have changed shape')
-              exit(1)
 
           # Match both occurrences:
           #     if (Ui::ScreenReaderModeActive()) {
@@ -1025,82 +966,13 @@ jobs:
               'state.focused = true;'
           )
 
-          src2, n = pattern.subn(replacement, src2)
+          src2, n = pattern.subn(replacement, src)
           if n == 0:
               print('ERROR: ScreenReaderModeActive() / state.focused '
                     'guard not found — upstream Dialogs::InnerWidget '
                     'may have changed shape')
               exit(1)
-          if 'telegram_accessibility_keyboard.h' not in src2:
-              src2, include_count = re.subn(
-                  r'(#include\s+"ui/screen_reader_mode\.h"\s*\n)',
-                  lambda m: m.group(1)
-                      + '#include "ui/accessibility/telegram_accessibility_keyboard.h"\n',
-                  src2,
-                  count=1)
-              if include_count == 0:
-                  print('ERROR: ui/screen_reader_mode.h include not found '
-                        '— cannot include NVDA speech helper')
-                  exit(1)
-
-          # The Qt/NVDA focus-child path can stay pinned to the first chat
-          # even while Telegram's own selection moves correctly. Announce from
-          # announceSelectedFocus(), where Dialogs::InnerWidget has just
-          # computed the real selected index, instead of querying it back
-          # from the accessibility tree after the fact.
-          direct_pattern = re.compile(
-              r'(accessibilityChildFocused\s*\(\s*index\s*\)\s*;)'
-          )
-          direct_replacement = (
-              r'\1'
-              '\n\t\t\t// a11y-direct-nvda-chat-speech: use the real'
-              '\n\t\t\t// Dialogs::InnerWidget selection index, not'
-              '\n\t\t\t// NVDA/Qt focusChild(), which may be stale.'
-              '\n\t\t\tconst auto a11yChatName ='
-              '\n\t\t\t\taccessibilityChildName(index).simplified();'
-              '\n\t\t\tif (!a11yChatName.isEmpty()) {'
-              '\n\t\t\t\tsetAccessibleName(a11yChatName);'
-              '\n\t\t\t\tQAccessibleEvent nameChanged('
-              '\n\t\t\t\t\tthis, QAccessible::NameChanged);'
-              '\n\t\t\t\tQAccessible::updateAccessibility(&nameChanged);'
-              '\n\t\t\t\tQAccessibleEvent parentFocus('
-              '\n\t\t\t\t\tthis, QAccessible::Focus);'
-              '\n\t\t\t\tQAccessible::updateAccessibility(&parentFocus);'
-              '\n\t\t\t\tTgAccessibility::LogLine(QStringLiteral('
-              '\n\t\t\t\t\t"[dialogs] direct announce immediate %1")'
-              '\n\t\t\t\t\t.arg(a11yChatName.left(40)));'
-              '\n\t\t\t\tstatic int a11ySpeechGeneration = 0;'
-              '\n\t\t\t\tconst int a11yThisSpeech = ++a11ySpeechGeneration;'
-              '\n\t\t\t\tQTimer::singleShot(180, this, ['
-              '\n\t\t\t\t\tthis, a11yChatName, a11yThisSpeech] {'
-              '\n\t\t\t\t\tif (a11yThisSpeech != a11ySpeechGeneration) {'
-              '\n\t\t\t\t\t\treturn;'
-              '\n\t\t\t\t\t}'
-              '\n\t\t\t\t\tsetAccessibleName(a11yChatName);'
-              '\n\t\t\t\t\tTgAccessibility::nvda::SpeakForced(a11yChatName);'
-              '\n\t\t\t\t\tQAccessibleEvent delayedNameChanged('
-              '\n\t\t\t\t\t\tthis, QAccessible::NameChanged);'
-              '\n\t\t\t\t\tQAccessible::updateAccessibility(&delayedNameChanged);'
-              '\n\t\t\t\t\tQAccessibleEvent delayedFocus('
-              '\n\t\t\t\t\t\tthis, QAccessible::Focus);'
-              '\n\t\t\t\t\tQAccessible::updateAccessibility(&delayedFocus);'
-              '\n\t\t\t\t\tTgAccessibility::LogLine(QStringLiteral('
-              '\n\t\t\t\t\t\t"[dialogs] direct announce delayed %1")'
-              '\n\t\t\t\t\t\t.arg(a11yChatName.left(40)));'
-              '\n\t\t\t\t});'
-              '\n\t\t\t}'
-          )
-          src2, direct_count = direct_pattern.subn(
-              direct_replacement,
-              src2)
-          if direct_count < 2:
-              print('ERROR: accessibilityChildFocused(index) call sites '
-                    'not found in announceSelectedFocus — upstream '
-                    'Dialogs::InnerWidget may have changed shape')
-              exit(1)
-          print('dialogs_inner_widget.cpp patched '
-                f'({focusable_count} focusable + {n} focused + '
-                f'{direct_count} direct speech site(s) updated)')
+          print(f'dialogs_inner_widget.cpp patched ({n} site(s) updated)')
 
           with open(cpp, 'w', encoding='utf-8') as f:
               f.write(src2)
@@ -1143,44 +1015,7 @@ jobs:
               h = f.read()
 
           if 'a11yActivateFocused' in h:
-              changed_h = False
-              if 'a11yMoveFocusedLink' not in h:
-                  h, n = re.subn(
-                      r'(void\s+a11yActivateFocused\s*\(\s*\)\s*;)',
-                      lambda m: m.group(1)
-                          + '\n\tbool a11yActivateFocusedLink();'
-                          + '\n\tvoid a11yMoveFocusedLink(int delta);'
-                          + '\n\tstd::vector<ClickHandlerPtr> a11yCollectFocusedLinks();'
-                          + '\n\tQString a11yFocusedLinkLabel(int index, int total) const;'
-                      + '\n\tQString a11yFocusedMessageSummary() const;'
-                          + '\n\tQString a11yFocusedMessageSummary() const;',
-                      h,
-                      count=1)
-                  if n == 0:
-                      print('ERROR: a11yActivateFocused declaration landmark not found')
-                      exit(1)
-                  changed_h = True
-              if '_a11yFocusedLinks' not in h:
-                  h, n = re.subn(
-                      r'(mutable std::vector<HistoryView::MessageSubItem>\s+_activeColumns\s*;)',
-                      lambda m: m.group(1)
-                          + '\n\tint _a11yFocusedLinkIndex = -1;'
-                          + '\n\tHistoryItem *_a11yFocusedLinksItem = nullptr;'
-                          + '\n\tstd::vector<ClickHandlerPtr> _a11yFocusedLinks;'
-                      + '\n\tstd::vector<QString> _a11yFocusedLinkLabels;'
-                          + '\n\tstd::vector<QString> _a11yFocusedLinkLabels;',
-                      h,
-                      count=1)
-                  if n == 0:
-                      print('ERROR: _activeColumns landmark not found in .h')
-                      exit(1)
-                  changed_h = True
-              if changed_h:
-                  with open(h_path, 'w', encoding='utf-8') as f:
-                      f.write(h)
-                  print('history_inner_widget.h extended (link navigation)')
-              else:
-                  print('history_inner_widget.h already patched (Enter/link-activate)')
+              print('history_inner_widget.h already patched (Enter-activate)')
           else:
               # Inject right after the accessibilityChildSubItemValue
               # declaration — keeps it inside the same accessibility block.
@@ -1188,72 +1023,30 @@ jobs:
                   r'(QString\s+accessibilityChildSubItemValue\s*\(\s*'
                   r'int\s+row\s*,\s*int\s+column\s*\)\s*const\s+override\s*;)',
                   lambda m: m.group(1)
-                      + '\n\tvoid a11yActivateFocused();'
-                      + '\n\tbool a11yActivateFocusedLink();'
-                      + '\n\tvoid a11yMoveFocusedLink(int delta);'
-                      + '\n\tstd::vector<ClickHandlerPtr> a11yCollectFocusedLinks();'
-                      + '\n\tQString a11yFocusedLinkLabel(int index, int total) const;',
+                      + '\n\tvoid a11yActivateFocused();',
                   h,
                   count=1)
               if n == 0:
                   print('ERROR: accessibilityChildSubItemValue landmark '
                         'not found in .h')
                   exit(1)
-              h, n_fields = re.subn(
-                  r'(mutable std::vector<HistoryView::MessageSubItem>\s+_activeColumns\s*;)',
-                  lambda m: m.group(1)
-                      + '\n\tint _a11yFocusedLinkIndex = -1;'
-                      + '\n\tHistoryItem *_a11yFocusedLinksItem = nullptr;'
-                      + '\n\tstd::vector<ClickHandlerPtr> _a11yFocusedLinks;',
-                  h,
-                  count=1)
-              if n_fields == 0:
-                  print('ERROR: _activeColumns landmark not found in .h')
-                  exit(1)
               with open(h_path, 'w', encoding='utf-8') as f:
                   f.write(h)
-              print('history_inner_widget.h patched (Enter/link-activate)')
+              print('history_inner_widget.h patched (Enter-activate)')
 
           with open(cpp_path, 'r', encoding='utf-8') as f:
               cpp = f.read()
 
-          if 'a11yCollectFocusedLinks' in cpp:
-              print('history_inner_widget.cpp already patched (Enter/link-activate)')
+          if 'a11yActivateFocused' in cpp:
+              print('history_inner_widget.cpp already patched (Enter-activate)')
               exit(0)
 
-          if 'telegram_accessibility_keyboard.h' not in cpp:
-              cpp, n_inc = re.subn(
-                  r'(#include\s+"history/history_inner_widget_accessibility\.h"\s*\n)',
-                  lambda m: m.group(1)
-                      + '#include "ui/accessibility/telegram_accessibility_keyboard.h"\n',
-                  cpp,
-                  count=1)
-              if n_inc == 0:
-                  print('ERROR: history_inner_widget_accessibility.h include not found')
-                  exit(1)
-
-          # Inject the Tab / Enter / Return handler just before the existing
+          # Inject the Enter/Return handler just before the existing
           # Space handler inside keyPressEvent's `if (count > 0)` block,
           # so it sits in exactly the same screen-reader navigation
           # context as Space.
           key_inject = (
-              'if (e->key() == Qt::Key_Tab\n'
-              '\t\t\t&& !(e->modifiers() & ~Qt::ShiftModifier)) {\n'
-              '\t\t\ta11yMoveFocusedLink(\n'
-              '\t\t\t\t(e->modifiers() & Qt::ShiftModifier) ? -1 : 1);\n'
-              '\t\t\te->accept();\n'
-              '\t\t\treturn;\n'
-              '\t\t}\n'
-              '\t\tif ((e->key() == Qt::Key_Right\n'
-              '\t\t\t\t|| e->key() == Qt::Key_Left)\n'
-              '\t\t\t&& (e->modifiers() & Qt::ControlModifier)\n'
-              '\t\t\t&& !(e->modifiers() & ~(Qt::ControlModifier | Qt::ShiftModifier))) {\n'
-              '\t\t\ta11yMoveFocusedLink(\n'
-              '\t\t\t\t(e->key() == Qt::Key_Left) ? -1 : 1);\n'
-              '\t\t\te->accept();\n'
-              '\t\t\treturn;\n'
-              '\t\t}\n'
-              '\t\tif (e->key() == Qt::Key_Return\n'
+              'if (e->key() == Qt::Key_Return\n'
               '\t\t\t|| e->key() == Qt::Key_Enter) {\n'
               '\t\t\ta11yActivateFocused();\n'
               '\t\t\te->accept();\n'
@@ -1271,297 +1064,48 @@ jobs:
               print('ERROR: Key_Space handler landmark not found in .cpp')
               exit(1)
 
-          cpp, n_tab_hook = re.subn(
-              r'(bool\s+HistoryInner::eventHook\s*\(\s*QEvent\s*\*\s*e\s*\)\s*\{\n)',
-              lambda m: m.group(1)
-                  + '\t// a11y-link-tab-eventhook: catch Tab before Qt focus traversal.\n'
-                  + '\tif (e->type() == QEvent::KeyPress) {\n'
-                  + '\t\tauto *key = static_cast<QKeyEvent*>(e);\n'
-                  + '\t\tif (key->key() == Qt::Key_Tab\n'
-                  + '\t\t\t\t&& !(key->modifiers() & ~Qt::ShiftModifier)\n'
-                  + '\t\t\t\t&& accessibilityChildCount() > 0) {\n'
-                  + '\t\t\ta11yMoveFocusedLink(\n'
-                  + '\t\t\t\t(key->modifiers() & Qt::ShiftModifier) ? -1 : 1);\n'
-                  + '\t\t\tkey->accept();\n'
-                  + '\t\t\treturn true;\n'
-                  + '\t\t}\n'
-                  + '\t}\n',
-              cpp,
-              count=1)
-          if n_tab_hook == 0:
-              print('ERROR: HistoryInner::eventHook landmark not found in .cpp')
-              exit(1)
-
           # Append the implementation. Same translation unit as the
           # ActivateClickHandler / textState / viewByItem / itemTop /
           # mapPointToItem / prepareClickContext helpers it relies on,
           # all already used by mouseActionFinish in this file.
-          impl = r'''
-          // === Enter/link a11y navigation (added by accessibility-patch) ===
-          std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {
-              _a11yFocusedLinks.clear();
-              _a11yFocusedLinkLabels.clear();
-              if (!_accessibilityFocusedItem) {
-                  _a11yFocusedLinkIndex = -1;
-                  _a11yFocusedLinksItem = nullptr;
-                  return _a11yFocusedLinks;
-              }
-              if (_a11yFocusedLinksItem != _accessibilityFocusedItem) {
-                  _a11yFocusedLinksItem = _accessibilityFocusedItem;
-                  _a11yFocusedLinkIndex = -1;
-              }
-              const auto view = viewByItem(_accessibilityFocusedItem);
-              if (!view) {
-                  _a11yFocusedLinkIndex = -1;
-                  return _a11yFocusedLinks;
-              }
-              const auto top = itemTop(view);
-              if (top < 0) {
-                  _a11yFocusedLinkIndex = -1;
-                  return _a11yFocusedLinks;
-              }
-              auto request = StateRequest();
-              const auto messageSummary = a11yFocusedMessageSummary();
-              const auto labelFromState = [&](const TextState &state) {
-                  QString detail = state.customTooltipText.simplified();
-                  const auto link = state.link;
-                  if (link) {
-                      if (detail.isEmpty()) detail = link->tooltip();
-                      if (detail.isEmpty()) detail = link->url();
-                      if (detail.isEmpty()) detail = link->copyToClipboardText();
-                      if (detail.isEmpty()) detail = link->dragText();
-                      if (detail.isEmpty()) detail = link->getTextEntity().data;
-                  }
-                  detail = detail.simplified();
-                  return detail.isEmpty() ? messageSummary : detail;
-              };
-              const auto add = [&](const TextState &state) {
-                  const auto link = state.link;
-                  if (!link) return;
-                  if (std::find(_a11yFocusedLinks.begin(),
-                          _a11yFocusedLinks.end(), link)
-                      != _a11yFocusedLinks.end()) {
-                      return;
-                  }
-                  _a11yFocusedLinks.push_back(link);
-                  _a11yFocusedLinkLabels.push_back(labelFromState(state));
-              };
-              const auto scan = [&](QPoint widgetPoint) {
-                  const auto itemPoint = mapPointToItem(widgetPoint, view);
-                  const auto state = view->textState(itemPoint, request);
-                  add(state);
-              };
-              const auto itemHeight = view->height();
-              const auto stepY = std::max(8, itemHeight / 12);
-              const auto stepX = std::max(16, width() / 8);
-              for (auto y = top + 4; y < top + itemHeight; y += stepY) {
-                  for (auto x = 4; x < width(); x += stepX) {
-                      scan(QPoint(x, y));
-                  }
-              }
-              for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {
-                  scan(QPoint(width() / 2, top + int(itemHeight * frac)));
-              }
-              if (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {
-                  _a11yFocusedLinkIndex = -1;
-              }
-              return _a11yFocusedLinks;
-          }
-
-          QString HistoryInner::a11yFocusedLinkLabel(int index, int total) const {
-              QString detail;
-              if (index >= 0 && index < int(_a11yFocusedLinkLabels.size())) {
-                  detail = _a11yFocusedLinkLabels[index].simplified();
-              }
-              if (detail.isEmpty()) {
-                  detail = a11yFocusedMessageSummary();
-              }
-              const auto link = (index >= 0 && index < int(_a11yFocusedLinks.size()))
-                  ? _a11yFocusedLinks[index]
-                  : ClickHandlerPtr();
-              const auto entity = link ? link->getTextEntity() : ClickHandler::TextEntity();
-              const auto isLink = link && (!link->url().isEmpty() || !entity.data.isEmpty());
-              auto result = QStringLiteral("%1 %2 из %3")
-                  .arg(isLink ? QStringLiteral("Ссылка") : QStringLiteral("Вложение"))
-                  .arg(index + 1)
-                  .arg(total);
-              if (!detail.isEmpty()) {
-                  result += QStringLiteral(": ") + detail.left(160);
-              }
-              return result;
-          }
-
-          QString HistoryInner::a11yFocusedMessageSummary() const {
-              if (!_accessibilityFocusedItem) {
-                  return QString();
-              }
-              const auto view = viewByItem(_accessibilityFocusedItem);
-              if (!view) {
-                  return QString();
-              }
-              auto parts = QStringList();
-              const auto active = HistoryView::ActiveMessageSubItems(view, _history);
-              for (const auto item : active) {
-                  switch (item) {
-                  case HistoryView::MessageSubItem::MediaType:
-                  case HistoryView::MessageSubItem::Download:
-                  case HistoryView::MessageSubItem::Played:
-                  case HistoryView::MessageSubItem::Artist:
-                  case HistoryView::MessageSubItem::Title:
-                  case HistoryView::MessageSubItem::Filename:
-                  case HistoryView::MessageSubItem::Duration:
-                  case HistoryView::MessageSubItem::Dimensions:
-                  case HistoryView::MessageSubItem::FileSize:
-                  case HistoryView::MessageSubItem::WebSite:
-                  case HistoryView::MessageSubItem::WebTitle:
-                  case HistoryView::MessageSubItem::WebDescription:
-                  case HistoryView::MessageSubItem::ContactName:
-                  case HistoryView::MessageSubItem::ContactPhone:
-                  case HistoryView::MessageSubItem::Location:
-                  case HistoryView::MessageSubItem::StickerEmoji:
-                  case HistoryView::MessageSubItem::GameTitle:
-                  case HistoryView::MessageSubItem::GameDescription:
-                  case HistoryView::MessageSubItem::InvoiceTitle:
-                  case HistoryView::MessageSubItem::InvoiceAmount:
-                  case HistoryView::MessageSubItem::PollQuestion:
-                  case HistoryView::MessageSubItem::TodoTitle:
-                  case HistoryView::MessageSubItem::Gift:
-                      break;
-                  default:
-                      continue;
-                  }
-                  auto value = HistoryView::MessageSubItemValue(
-                      view,
-                      _history,
-                      item).simplified();
-                  if (value.isEmpty()) {
-                      continue;
-                  }
-                  const auto label = HistoryView::MessageSubItemLabel(item).simplified();
-                  parts.push_back(label.isEmpty()
-                      ? value
-                      : (label + QStringLiteral(": ") + value));
-              }
-              if (parts.isEmpty()) {
-                  const auto message = HistoryView::MessageSubItemValue(
-                      view,
-                      _history,
-                      HistoryView::MessageSubItem::Message).simplified();
-                  if (!message.isEmpty()) {
-                      parts.push_back(message.left(120));
-                  }
-              }
-              return parts.join(QStringLiteral(", "));
-          }
-
-          void HistoryInner::a11yMoveFocusedLink(int delta) {
-              const auto links = a11yCollectFocusedLinks();
-              const auto total = int(links.size());
-              if (total <= 0) {
-                  TgAccessibility::nvda::SpeakForced(QStringLiteral("В сообщении нет ссылок или вложений"));
-                  TgAccessibility::LogLine(QStringLiteral("[messages] no links in focused message"));
-                  return;
-              }
-              if (_a11yFocusedLinkIndex < 0) {
-                  _a11yFocusedLinkIndex = (delta < 0) ? (total - 1) : 0;
-              } else {
-                  _a11yFocusedLinkIndex = (_a11yFocusedLinkIndex + delta + total) % total;
-              }
-              const auto label = a11yFocusedLinkLabel(_a11yFocusedLinkIndex, total);
-              TgAccessibility::nvda::SpeakForced(label);
-              if (_a11yFocusedLinkIndex >= 0
-                      && _a11yFocusedLinkIndex < int(_a11yFocusedLinks.size())) {
-                  const auto &link = _a11yFocusedLinks[_a11yFocusedLinkIndex];
-                  const auto entity = link ? link->getTextEntity() : ClickHandler::TextEntity();
-                  TgAccessibility::LogLine(QStringLiteral(
-                      "[messages] focused link %1 type=%2 url=%3 data=%4")
-                      .arg(label.left(80))
-                      .arg(int(entity.type))
-                      .arg(link ? link->url().left(80) : QString())
-                      .arg(entity.data.left(80)));
-              } else {
-                  TgAccessibility::LogLine(QStringLiteral("[messages] focused link %1").arg(label.left(80)));
-              }
-          }
-
-          bool HistoryInner::a11yActivateFocusedLink() {
-              const auto links = a11yCollectFocusedLinks();
-              if (_a11yFocusedLinkIndex < 0
-                      || _a11yFocusedLinkIndex >= int(links.size())) {
-                  return false;
-              }
-              const auto link = links[_a11yFocusedLinkIndex];
-              if (!link || !_accessibilityFocusedItem) {
-                  return false;
-              }
-              TgAccessibility::LogLine(QStringLiteral("[messages] activate focused link index=%1")
-                  .arg(_a11yFocusedLinkIndex));
-              ActivateClickHandler(
-                  window(),
-                  link,
-                  prepareClickContext(
-                      Qt::LeftButton,
-                      _accessibilityFocusedItem->fullId()));
-              return true;
-          }
-
-          void HistoryInner::a11yActivateFocused() {
-              if (!_accessibilityFocusedItem) {
-                  return;
-              }
-              const auto item = _accessibilityFocusedItem;
-              if (const auto media = item->media()) {
-                  if (const auto document = media->document()) {
-                      if (document->isVoiceMessage()
-                              || document->isSong()
-                              || document->isAudioFile()
-                              || document->isVideoMessage()) {
-                          TgAccessibility::LogLine(QStringLiteral("[messages] play focused media by Enter"));
-                          playPauseFocusedMedia();
-                          return;
-                      }
-                  }
-              }
-              const auto links = a11yCollectFocusedLinks();
-              if (!links.empty()) {
-                  if (_a11yFocusedLinkIndex < 0) {
-                      _a11yFocusedLinkIndex = 0;
-                  }
-                  if (a11yActivateFocusedLink()) {
-                      return;
-                  }
-              }
-              const auto view = viewByItem(_accessibilityFocusedItem);
-              if (!view) {
-                  return;
-              }
-              const auto top = itemTop(view);
-              if (top < 0) {
-                  return;
-              }
-              const auto h = view->height();
-              const auto x = width() / 2;
-              auto request = StateRequest();
-              ClickHandlerPtr link;
-              for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {
-                  const auto y = top + int(h * frac);
-                  const auto itemPoint = mapPointToItem(QPoint(x, y), view);
-                  const auto state = view->textState(itemPoint, request);
-                  if (state.link) {
-                      link = state.link;
-                      break;
-                  }
-              }
-              if (link) {
-                  ActivateClickHandler(
-                      window(),
-                      link,
-                      prepareClickContext(
-                          Qt::LeftButton,
-                          _accessibilityFocusedItem->fullId()));
-              }
-          }
-          '''
+          impl = (
+              '\n'
+              '// === Enter-to-activate (added by accessibility-patch) ===\n'
+              'void HistoryInner::a11yActivateFocused() {\n'
+              '\tif (!_accessibilityFocusedItem) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tconst auto view = viewByItem(_accessibilityFocusedItem);\n'
+              '\tif (!view) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tconst auto top = itemTop(view);\n'
+              '\tif (top < 0) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tconst auto h = view->height();\n'
+              '\tconst auto x = width() / 2;\n'
+              '\tauto request = StateRequest();\n'
+              '\tClickHandlerPtr link;\n'
+              '\tfor (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {\n'
+              '\t\tconst auto y = top + int(h * frac);\n'
+              '\t\tconst auto itemPoint = mapPointToItem(QPoint(x, y), view);\n'
+              '\t\tconst auto state = view->textState(itemPoint, request);\n'
+              '\t\tif (state.link) {\n'
+              '\t\t\tlink = state.link;\n'
+              '\t\t\tbreak;\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\tif (link) {\n'
+              '\t\tActivateClickHandler(\n'
+              '\t\t\twindow(),\n'
+              '\t\t\tlink,\n'
+              '\t\t\tprepareClickContext(\n'
+              '\t\t\t\tQt::LeftButton,\n'
+              '\t\t\t\t_accessibilityFocusedItem->fullId()));\n'
+              '\t}\n'
+              '}\n'
+          )
           cpp = cpp.rstrip() + '\n' + impl
           with open(cpp_path, 'w', encoding='utf-8') as f:
               f.write(cpp)
@@ -1845,9 +1389,11 @@ jobs:
           mkdir installer
           echo [Setup] > setup.iss
           echo AppName=Telegram Desktop Accessible >> setup.iss
+          echo AppId={{8A0B3A11-54B6-4D53-9C74-4D0B5E54A11A} >> setup.iss
           echo AppVersion=${{ env.TDESKTOP_VERSION }}-accessible >> setup.iss
           echo AppPublisher=tdesktop-accessible >> setup.iss
           echo AppPublisherURL=https://github.com/Nikita34196/tdesktop-accessible >> setup.iss
+          echo AppUpdatesURL=https://github.com/Nikita34196/tdesktop-accessible/releases/latest >> setup.iss
           echo DefaultDirName={autopf}\TelegramAccessible >> setup.iss
           echo DefaultGroupName=Telegram Accessible >> setup.iss
           echo OutputDir=installer >> setup.iss
@@ -1885,22 +1431,6 @@ jobs:
           name: Telegram-Accessible-Setup
           path: installer/Telegram-Accessible-Setup.exe
           retention-days: 90
-
-      - name: Verify release payload
-        shell: bash
-        run: |
-          set -e
-          for file in \
-            artifact/Telegram.exe \
-            artifact/nvdaControllerClient.dll \
-            installer/Telegram-Accessible-Setup.exe
-          do
-            if [ ! -s "$file" ]; then
-              echo "ERROR: required release file is missing or empty: $file"
-              exit 1
-            fi
-            echo "Release file ready: $file ($(du -h "$file" | cut -f1))"
-          done
 
       # ============================================
       # 13. Create Release (on tag push only)

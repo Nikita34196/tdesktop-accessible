@@ -1402,32 +1402,7 @@ jobs:
               auto parts = QStringList();
               const auto active = HistoryView::ActiveMessageSubItems(view, _history);
               for (const auto item : active) {
-                  switch (item) {
-                  case HistoryView::MessageSubItem::MediaType:
-                  case HistoryView::MessageSubItem::Download:
-                  case HistoryView::MessageSubItem::Played:
-                  case HistoryView::MessageSubItem::Artist:
-                  case HistoryView::MessageSubItem::Title:
-                  case HistoryView::MessageSubItem::Filename:
-                  case HistoryView::MessageSubItem::Duration:
-                  case HistoryView::MessageSubItem::Dimensions:
-                  case HistoryView::MessageSubItem::FileSize:
-                  case HistoryView::MessageSubItem::WebSite:
-                  case HistoryView::MessageSubItem::WebTitle:
-                  case HistoryView::MessageSubItem::WebDescription:
-                  case HistoryView::MessageSubItem::ContactName:
-                  case HistoryView::MessageSubItem::ContactPhone:
-                  case HistoryView::MessageSubItem::Location:
-                  case HistoryView::MessageSubItem::StickerEmoji:
-                  case HistoryView::MessageSubItem::GameTitle:
-                  case HistoryView::MessageSubItem::GameDescription:
-                  case HistoryView::MessageSubItem::InvoiceTitle:
-                  case HistoryView::MessageSubItem::InvoiceAmount:
-                  case HistoryView::MessageSubItem::PollQuestion:
-                  case HistoryView::MessageSubItem::TodoTitle:
-                  case HistoryView::MessageSubItem::Gift:
-                      break;
-                  default:
+                  if (item == HistoryView::MessageSubItem::Message) {
                       continue;
                   }
                   auto value = HistoryView::MessageSubItemValue(
@@ -1441,6 +1416,9 @@ jobs:
                   parts.push_back(label.isEmpty()
                       ? value
                       : (label + QStringLiteral(": ") + value));
+                  if (parts.size() >= 6) {
+                      break;
+                  }
               }
               if (parts.isEmpty()) {
                   const auto message = HistoryView::MessageSubItemValue(
@@ -1734,6 +1712,10 @@ jobs:
           cd %REPO_NAME%
           set _CL_=/Z7 %_CL_%
           cmake --build out --config Release --target Telegram --parallel 2
+          if errorlevel 1 (
+            sccache --show-stats || rem ignore if sccache absent
+            exit /b 1
+          )
           sccache --show-stats || rem ignore if sccache absent
 
       # ============================================

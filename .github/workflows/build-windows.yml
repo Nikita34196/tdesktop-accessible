@@ -1151,7 +1151,9 @@ jobs:
                           + '\n\tbool a11yActivateFocusedLink();'
                           + '\n\tvoid a11yMoveFocusedLink(int delta);'
                           + '\n\tstd::vector<ClickHandlerPtr> a11yCollectFocusedLinks();'
-                          + '\n\tQString a11yFocusedLinkLabel(int index, int total) const;',
+                          + '\n\tQString a11yFocusedLinkLabel(int index, int total) const;'
+                      + '\n\tQString a11yFocusedMessageSummary() const;'
+                          + '\n\tQString a11yFocusedMessageSummary() const;',
                       h,
                       count=1)
                   if n == 0:
@@ -1164,7 +1166,9 @@ jobs:
                       lambda m: m.group(1)
                           + '\n\tint _a11yFocusedLinkIndex = -1;'
                           + '\n\tHistoryItem *_a11yFocusedLinksItem = nullptr;'
-                          + '\n\tstd::vector<ClickHandlerPtr> _a11yFocusedLinks;',
+                          + '\n\tstd::vector<ClickHandlerPtr> _a11yFocusedLinks;'
+                      + '\n\tstd::vector<QString> _a11yFocusedLinkLabels;'
+                          + '\n\tstd::vector<QString> _a11yFocusedLinkLabels;',
                       h,
                       count=1)
                   if n == 0:
@@ -1292,191 +1296,272 @@ jobs:
           # ActivateClickHandler / textState / viewByItem / itemTop /
           # mapPointToItem / prepareClickContext helpers it relies on,
           # all already used by mouseActionFinish in this file.
-          impl = (
-              '\n'
-              '// === Enter/link a11y navigation (added by accessibility-patch) ===\n'
-              'std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {\n'
-              '\t_a11yFocusedLinks.clear();\n'
-              '\tif (!_accessibilityFocusedItem) {\n'
-              '\t\t_a11yFocusedLinkIndex = -1;\n'
-              '\t\t_a11yFocusedLinksItem = nullptr;\n'
-              '\t\treturn _a11yFocusedLinks;\n'
-              '\t}\n'
-              '\tif (_a11yFocusedLinksItem != _accessibilityFocusedItem) {\n'
-              '\t\t_a11yFocusedLinksItem = _accessibilityFocusedItem;\n'
-              '\t\t_a11yFocusedLinkIndex = -1;\n'
-              '\t}\n'
-              '\tconst auto view = viewByItem(_accessibilityFocusedItem);\n'
-              '\tif (!view) {\n'
-              '\t\t_a11yFocusedLinkIndex = -1;\n'
-              '\t\treturn _a11yFocusedLinks;\n'
-              '\t}\n'
-              '\tconst auto top = itemTop(view);\n'
-              '\tif (top < 0) {\n'
-              '\t\t_a11yFocusedLinkIndex = -1;\n'
-              '\t\treturn _a11yFocusedLinks;\n'
-              '\t}\n'
-              '\tauto request = StateRequest();\n'
-              '\tconst auto add = [&](const ClickHandlerPtr &link) {\n'
-              '\t\tif (!link) return;\n'
-              '\t\tif (std::find(_a11yFocusedLinks.begin(),\n'
-              '\t\t\t\t_a11yFocusedLinks.end(), link)\n'
-              '\t\t\t!= _a11yFocusedLinks.end()) {\n'
-              '\t\t\treturn;\n'
-              '\t\t}\n'
-              '\t\t_a11yFocusedLinks.push_back(link);\n'
-              '\t};\n'
-              '\tconst auto scan = [&](QPoint widgetPoint) {\n'
-              '\t\tconst auto itemPoint = mapPointToItem(widgetPoint, view);\n'
-              '\t\tconst auto state = view->textState(itemPoint, request);\n'
-              '\t\tadd(state.link);\n'
-              '\t};\n'
-              '\tconst auto itemHeight = view->height();\n'
-              '\tconst auto stepY = std::max(8, itemHeight / 12);\n'
-              '\tconst auto stepX = std::max(16, width() / 8);\n'
-              '\tfor (auto y = top + 4; y < top + itemHeight; y += stepY) {\n'
-              '\t\tfor (auto x = 4; x < width(); x += stepX) {\n'
-              '\t\t\tscan(QPoint(x, y));\n'
-              '\t\t}\n'
-              '\t}\n'
-              '\tfor (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {\n'
-              '\t\tscan(QPoint(width() / 2, top + int(itemHeight * frac)));\n'
-              '\t}\n'
-              '\tif (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {\n'
-              '\t\t_a11yFocusedLinkIndex = -1;\n'
-              '\t}\n'
-              '\treturn _a11yFocusedLinks;\n'
-              '}\n'
-              '\n'
-              'QString HistoryInner::a11yFocusedLinkLabel(int index, int total) const {\n'
-              '\tauto result = QStringLiteral("Объект %1 из %2").arg(index + 1).arg(total);\n'
-              '\tif (index < 0 || index >= int(_a11yFocusedLinks.size())) {\n'
-              '\t\treturn result;\n'
-              '\t}\n'
-              '\tconst auto &link = _a11yFocusedLinks[index];\n'
-              '\tQString detail;\n'
-              '\tif (link) {\n'
-              '\t\tdetail = link->tooltip();\n'
-              '\t\tif (detail.isEmpty()) detail = link->url();\n'
-              '\t\tif (detail.isEmpty()) detail = link->copyToClipboardText();\n'
-              '\t\tif (detail.isEmpty()) detail = link->dragText();\n'
-              '\t\tif (detail.isEmpty()) detail = link->getTextEntity().data;\n'
-              '\t}\n'
-              '\tdetail = detail.simplified();\n'
-              '\tif (!detail.isEmpty()) {\n'
-              '\t\tresult += QStringLiteral(": ") + detail.left(120);\n'
-              '\t}\n'
-              '\treturn result;\n'
-              '}\n'
-              '\n'
-              'void HistoryInner::a11yMoveFocusedLink(int delta) {\n'
-              '\tconst auto links = a11yCollectFocusedLinks();\n'
-              '\tconst auto total = int(links.size());\n'
-              '\tif (total <= 0) {\n'
-              '\t\tTgAccessibility::nvda::SpeakForced(QStringLiteral("В сообщении нет ссылок или вложений"));\n'
-              '\t\tTgAccessibility::LogLine(QStringLiteral("[messages] no links in focused message"));\n'
-              '\t\treturn;\n'
-              '\t}\n'
-              '\tif (_a11yFocusedLinkIndex < 0) {\n'
-              '\t\t_a11yFocusedLinkIndex = (delta < 0) ? (total - 1) : 0;\n'
-              '\t} else {\n'
-              '\t\t_a11yFocusedLinkIndex = (_a11yFocusedLinkIndex + delta + total) % total;\n'
-              '\t}\n'
-              '\tconst auto label = a11yFocusedLinkLabel(_a11yFocusedLinkIndex, total);\n'
-              '\tTgAccessibility::nvda::SpeakForced(label);\n'
-              '\tif (_a11yFocusedLinkIndex >= 0\n'
-              '\t\t\t&& _a11yFocusedLinkIndex < int(_a11yFocusedLinks.size())) {\n'
-              '\t\tconst auto &link = _a11yFocusedLinks[_a11yFocusedLinkIndex];\n'
-              '\t\tconst auto entity = link ? link->getTextEntity() : ClickHandler::TextEntity();\n'
-              '\t\tTgAccessibility::LogLine(QStringLiteral(\n'
-              '\t\t\t"[messages] focused link %1 type=%2 url=%3 data=%4")\n'
-              '\t\t\t.arg(label.left(80))\n'
-              '\t\t\t.arg(int(entity.type))\n'
-              '\t\t\t.arg(link ? link->url().left(80) : QString())\n'
-              '\t\t\t.arg(entity.data.left(80)));\n'
-              '\t} else {\n'
-              '\t\tTgAccessibility::LogLine(QStringLiteral("[messages] focused link %1").arg(label.left(80)));\n'
-              '\t}\n'
-              '}\n'
-              '\n'
-              'bool HistoryInner::a11yActivateFocusedLink() {\n'
-              '\tconst auto links = a11yCollectFocusedLinks();\n'
-              '\tif (_a11yFocusedLinkIndex < 0\n'
-              '\t\t\t|| _a11yFocusedLinkIndex >= int(links.size())) {\n'
-              '\t\treturn false;\n'
-              '\t}\n'
-              '\tconst auto link = links[_a11yFocusedLinkIndex];\n'
-              '\tif (!link || !_accessibilityFocusedItem) {\n'
-              '\t\treturn false;\n'
-              '\t}\n'
-              '\tTgAccessibility::LogLine(QStringLiteral("[messages] activate focused link index=%1")\n'
-              '\t\t.arg(_a11yFocusedLinkIndex));\n'
-              '\tActivateClickHandler(\n'
-              '\t\twindow(),\n'
-              '\t\tlink,\n'
-              '\t\tprepareClickContext(\n'
-              '\t\t\tQt::LeftButton,\n'
-              '\t\t\t_accessibilityFocusedItem->fullId()));\n'
-              '\treturn true;\n'
-              '}\n'
-              '\n'
-              'void HistoryInner::a11yActivateFocused() {\n'
-              '\tif (!_accessibilityFocusedItem) {\n'
-              '\t\treturn;\n'
-              '\t}\n'
-              '\tconst auto item = _accessibilityFocusedItem;\n'
-              '\tif (const auto media = item->media()) {\n'
-              '\t\tif (const auto document = media->document()) {\n'
-              '\t\t\tif (document->isVoiceMessage()\n'
-              '\t\t\t\t\t|| document->isSong()\n'
-              '\t\t\t\t\t|| document->isAudioFile()\n'
-              '\t\t\t\t\t|| document->isVideoMessage()) {\n'
-              '\t\t\t\tTgAccessibility::LogLine(QStringLiteral("[messages] play focused media by Enter"));\n'
-              '\t\t\t\tplayPauseFocusedMedia();\n'
-              '\t\t\t\treturn;\n'
-              '\t\t\t}\n'
-              '\t\t}\n'
-              '\t}\n'
-              '\tconst auto links = a11yCollectFocusedLinks();\n'
-              '\tif (!links.empty()) {\n'
-              '\t\tif (_a11yFocusedLinkIndex < 0) {\n'
-              '\t\t\t_a11yFocusedLinkIndex = 0;\n'
-              '\t\t}\n'
-              '\t\tif (a11yActivateFocusedLink()) {\n'
-              '\t\t\treturn;\n'
-              '\t\t}\n'
-              '\t}\n'
-              '\tconst auto view = viewByItem(_accessibilityFocusedItem);\n'
-              '\tif (!view) {\n'
-              '\t\treturn;\n'
-              '\t}\n'
-              '\tconst auto top = itemTop(view);\n'
-              '\tif (top < 0) {\n'
-              '\t\treturn;\n'
-              '\t}\n'
-              '\tconst auto h = view->height();\n'
-              '\tconst auto x = width() / 2;\n'
-              '\tauto request = StateRequest();\n'
-              '\tClickHandlerPtr link;\n'
-              '\tfor (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {\n'
-              '\t\tconst auto y = top + int(h * frac);\n'
-              '\t\tconst auto itemPoint = mapPointToItem(QPoint(x, y), view);\n'
-              '\t\tconst auto state = view->textState(itemPoint, request);\n'
-              '\t\tif (state.link) {\n'
-              '\t\t\tlink = state.link;\n'
-              '\t\t\tbreak;\n'
-              '\t\t}\n'
-              '\t}\n'
-              '\tif (link) {\n'
-              '\t\tActivateClickHandler(\n'
-              '\t\t\twindow(),\n'
-              '\t\t\tlink,\n'
-              '\t\t\tprepareClickContext(\n'
-              '\t\t\t\tQt::LeftButton,\n'
-              '\t\t\t\t_accessibilityFocusedItem->fullId()));\n'
-              '\t}\n'
-              '}\n'
-          )
+          impl = r'''
+// === Enter/link a11y navigation (added by accessibility-patch) ===
+std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {
+	_a11yFocusedLinks.clear();
+	_a11yFocusedLinkLabels.clear();
+	if (!_accessibilityFocusedItem) {
+		_a11yFocusedLinkIndex = -1;
+		_a11yFocusedLinksItem = nullptr;
+		return _a11yFocusedLinks;
+	}
+	if (_a11yFocusedLinksItem != _accessibilityFocusedItem) {
+		_a11yFocusedLinksItem = _accessibilityFocusedItem;
+		_a11yFocusedLinkIndex = -1;
+	}
+	const auto view = viewByItem(_accessibilityFocusedItem);
+	if (!view) {
+		_a11yFocusedLinkIndex = -1;
+		return _a11yFocusedLinks;
+	}
+	const auto top = itemTop(view);
+	if (top < 0) {
+		_a11yFocusedLinkIndex = -1;
+		return _a11yFocusedLinks;
+	}
+	auto request = StateRequest();
+	const auto messageSummary = a11yFocusedMessageSummary();
+	const auto labelFromState = [&](const TextState &state) {
+		QString detail = state.customTooltipText.simplified();
+		const auto link = state.link;
+		if (link) {
+			if (detail.isEmpty()) detail = link->tooltip();
+			if (detail.isEmpty()) detail = link->url();
+			if (detail.isEmpty()) detail = link->copyToClipboardText();
+			if (detail.isEmpty()) detail = link->dragText();
+			if (detail.isEmpty()) detail = link->getTextEntity().data;
+		}
+		detail = detail.simplified();
+		return detail.isEmpty() ? messageSummary : detail;
+	};
+	const auto add = [&](const TextState &state) {
+		const auto link = state.link;
+		if (!link) return;
+		if (std::find(_a11yFocusedLinks.begin(),
+				_a11yFocusedLinks.end(), link)
+			!= _a11yFocusedLinks.end()) {
+			return;
+		}
+		_a11yFocusedLinks.push_back(link);
+		_a11yFocusedLinkLabels.push_back(labelFromState(state));
+	};
+	const auto scan = [&](QPoint widgetPoint) {
+		const auto itemPoint = mapPointToItem(widgetPoint, view);
+		const auto state = view->textState(itemPoint, request);
+		add(state);
+	};
+	const auto itemHeight = view->height();
+	const auto stepY = std::max(8, itemHeight / 12);
+	const auto stepX = std::max(16, width() / 8);
+	for (auto y = top + 4; y < top + itemHeight; y += stepY) {
+		for (auto x = 4; x < width(); x += stepX) {
+			scan(QPoint(x, y));
+		}
+	}
+	for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {
+		scan(QPoint(width() / 2, top + int(itemHeight * frac)));
+	}
+	if (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {
+		_a11yFocusedLinkIndex = -1;
+	}
+	return _a11yFocusedLinks;
+}
+
+QString HistoryInner::a11yFocusedLinkLabel(int index, int total) const {
+	QString detail;
+	if (index >= 0 && index < int(_a11yFocusedLinkLabels.size())) {
+		detail = _a11yFocusedLinkLabels[index].simplified();
+	}
+	if (detail.isEmpty()) {
+		detail = a11yFocusedMessageSummary();
+	}
+	const auto link = (index >= 0 && index < int(_a11yFocusedLinks.size()))
+		? _a11yFocusedLinks[index]
+		: ClickHandlerPtr();
+	const auto entity = link ? link->getTextEntity() : ClickHandler::TextEntity();
+	const auto isLink = link && (!link->url().isEmpty() || !entity.data.isEmpty());
+	auto result = QStringLiteral("%1 %2 из %3")
+		.arg(isLink ? QStringLiteral("Ссылка") : QStringLiteral("Вложение"))
+		.arg(index + 1)
+		.arg(total);
+	if (!detail.isEmpty()) {
+		result += QStringLiteral(": ") + detail.left(160);
+	}
+	return result;
+}
+
+QString HistoryInner::a11yFocusedMessageSummary() const {
+	if (!_accessibilityFocusedItem) {
+		return QString();
+	}
+	const auto view = viewByItem(_accessibilityFocusedItem);
+	if (!view) {
+		return QString();
+	}
+	auto parts = QStringList();
+	const auto active = HistoryView::ActiveMessageSubItems(view, _history);
+	for (const auto item : active) {
+		switch (item) {
+		case HistoryView::MessageSubItem::MediaType:
+		case HistoryView::MessageSubItem::Download:
+		case HistoryView::MessageSubItem::Played:
+		case HistoryView::MessageSubItem::Artist:
+		case HistoryView::MessageSubItem::Title:
+		case HistoryView::MessageSubItem::Filename:
+		case HistoryView::MessageSubItem::Duration:
+		case HistoryView::MessageSubItem::Dimensions:
+		case HistoryView::MessageSubItem::FileSize:
+		case HistoryView::MessageSubItem::WebSite:
+		case HistoryView::MessageSubItem::WebTitle:
+		case HistoryView::MessageSubItem::WebDescription:
+		case HistoryView::MessageSubItem::ContactName:
+		case HistoryView::MessageSubItem::ContactPhone:
+		case HistoryView::MessageSubItem::Location:
+		case HistoryView::MessageSubItem::StickerEmoji:
+		case HistoryView::MessageSubItem::GameTitle:
+		case HistoryView::MessageSubItem::GameDescription:
+		case HistoryView::MessageSubItem::InvoiceTitle:
+		case HistoryView::MessageSubItem::InvoiceAmount:
+		case HistoryView::MessageSubItem::PollQuestion:
+		case HistoryView::MessageSubItem::TodoTitle:
+		case HistoryView::MessageSubItem::Gift:
+			break;
+		default:
+			continue;
+		}
+		auto value = HistoryView::MessageSubItemValue(
+			view,
+			_history,
+			item).simplified();
+		if (value.isEmpty()) {
+			continue;
+		}
+		const auto label = HistoryView::MessageSubItemLabel(item).simplified();
+		parts.push_back(label.isEmpty()
+			? value
+			: (label + QStringLiteral(": ") + value));
+	}
+	if (parts.isEmpty()) {
+		const auto message = HistoryView::MessageSubItemValue(
+			view,
+			_history,
+			HistoryView::MessageSubItem::Message).simplified();
+		if (!message.isEmpty()) {
+			parts.push_back(message.left(120));
+		}
+	}
+	return parts.join(QStringLiteral(", "));
+}
+
+void HistoryInner::a11yMoveFocusedLink(int delta) {
+	const auto links = a11yCollectFocusedLinks();
+	const auto total = int(links.size());
+	if (total <= 0) {
+		TgAccessibility::nvda::SpeakForced(QStringLiteral("В сообщении нет ссылок или вложений"));
+		TgAccessibility::LogLine(QStringLiteral("[messages] no links in focused message"));
+		return;
+	}
+	if (_a11yFocusedLinkIndex < 0) {
+		_a11yFocusedLinkIndex = (delta < 0) ? (total - 1) : 0;
+	} else {
+		_a11yFocusedLinkIndex = (_a11yFocusedLinkIndex + delta + total) % total;
+	}
+	const auto label = a11yFocusedLinkLabel(_a11yFocusedLinkIndex, total);
+	TgAccessibility::nvda::SpeakForced(label);
+	if (_a11yFocusedLinkIndex >= 0
+			&& _a11yFocusedLinkIndex < int(_a11yFocusedLinks.size())) {
+		const auto &link = _a11yFocusedLinks[_a11yFocusedLinkIndex];
+		const auto entity = link ? link->getTextEntity() : ClickHandler::TextEntity();
+		TgAccessibility::LogLine(QStringLiteral(
+			"[messages] focused link %1 type=%2 url=%3 data=%4")
+			.arg(label.left(80))
+			.arg(int(entity.type))
+			.arg(link ? link->url().left(80) : QString())
+			.arg(entity.data.left(80)));
+	} else {
+		TgAccessibility::LogLine(QStringLiteral("[messages] focused link %1").arg(label.left(80)));
+	}
+}
+
+bool HistoryInner::a11yActivateFocusedLink() {
+	const auto links = a11yCollectFocusedLinks();
+	if (_a11yFocusedLinkIndex < 0
+			|| _a11yFocusedLinkIndex >= int(links.size())) {
+		return false;
+	}
+	const auto link = links[_a11yFocusedLinkIndex];
+	if (!link || !_accessibilityFocusedItem) {
+		return false;
+	}
+	TgAccessibility::LogLine(QStringLiteral("[messages] activate focused link index=%1")
+		.arg(_a11yFocusedLinkIndex));
+	ActivateClickHandler(
+		window(),
+		link,
+		prepareClickContext(
+			Qt::LeftButton,
+			_accessibilityFocusedItem->fullId()));
+	return true;
+}
+
+void HistoryInner::a11yActivateFocused() {
+	if (!_accessibilityFocusedItem) {
+		return;
+	}
+	const auto item = _accessibilityFocusedItem;
+	if (const auto media = item->media()) {
+		if (const auto document = media->document()) {
+			if (document->isVoiceMessage()
+					|| document->isSong()
+					|| document->isAudioFile()
+					|| document->isVideoMessage()) {
+				TgAccessibility::LogLine(QStringLiteral("[messages] play focused media by Enter"));
+				playPauseFocusedMedia();
+				return;
+			}
+		}
+	}
+	const auto links = a11yCollectFocusedLinks();
+	if (!links.empty()) {
+		if (_a11yFocusedLinkIndex < 0) {
+			_a11yFocusedLinkIndex = 0;
+		}
+		if (a11yActivateFocusedLink()) {
+			return;
+		}
+	}
+	const auto view = viewByItem(_accessibilityFocusedItem);
+	if (!view) {
+		return;
+	}
+	const auto top = itemTop(view);
+	if (top < 0) {
+		return;
+	}
+	const auto h = view->height();
+	const auto x = width() / 2;
+	auto request = StateRequest();
+	ClickHandlerPtr link;
+	for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {
+		const auto y = top + int(h * frac);
+		const auto itemPoint = mapPointToItem(QPoint(x, y), view);
+		const auto state = view->textState(itemPoint, request);
+		if (state.link) {
+			link = state.link;
+			break;
+		}
+	}
+	if (link) {
+		ActivateClickHandler(
+			window(),
+			link,
+			prepareClickContext(
+				Qt::LeftButton,
+				_accessibilityFocusedItem->fullId()));
+	}
+}
+'''
           cpp = cpp.rstrip() + '\n' + impl
           with open(cpp_path, 'w', encoding='utf-8') as f:
               f.write(cpp)

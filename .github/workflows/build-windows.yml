@@ -1144,7 +1144,7 @@ jobs:
 
           if 'a11yActivateFocused' in h:
               changed_h = False
-              if 'a11yMoveFocusedLink' not in h:
+              if 'a11yFocusedMessageSummary' not in h:
                   h, n = re.subn(
                       r'(void\s+a11yActivateFocused\s*\(\s*\)\s*;)',
                       lambda m: m.group(1)
@@ -1152,7 +1152,6 @@ jobs:
                           + '\n\tvoid a11yMoveFocusedLink(int delta);'
                           + '\n\tstd::vector<ClickHandlerPtr> a11yCollectFocusedLinks();'
                           + '\n\tQString a11yFocusedLinkLabel(int index, int total) const;'
-                      + '\n\tQString a11yFocusedMessageSummary() const;'
                           + '\n\tQString a11yFocusedMessageSummary() const;',
                       h,
                       count=1)
@@ -1160,14 +1159,13 @@ jobs:
                       print('ERROR: a11yActivateFocused declaration landmark not found')
                       exit(1)
                   changed_h = True
-              if '_a11yFocusedLinks' not in h:
+              if '_a11yFocusedLinkLabels' not in h:
                   h, n = re.subn(
                       r'(mutable std::vector<HistoryView::MessageSubItem>\s+_activeColumns\s*;)',
                       lambda m: m.group(1)
                           + '\n\tint _a11yFocusedLinkIndex = -1;'
                           + '\n\tHistoryItem *_a11yFocusedLinksItem = nullptr;'
                           + '\n\tstd::vector<ClickHandlerPtr> _a11yFocusedLinks;'
-                      + '\n\tstd::vector<QString> _a11yFocusedLinkLabels;'
                           + '\n\tstd::vector<QString> _a11yFocusedLinkLabels;',
                       h,
                       count=1)
@@ -1192,7 +1190,8 @@ jobs:
                       + '\n\tbool a11yActivateFocusedLink();'
                       + '\n\tvoid a11yMoveFocusedLink(int delta);'
                       + '\n\tstd::vector<ClickHandlerPtr> a11yCollectFocusedLinks();'
-                      + '\n\tQString a11yFocusedLinkLabel(int index, int total) const;',
+                      + '\n\tQString a11yFocusedLinkLabel(int index, int total) const;'
+                      + '\n\tQString a11yFocusedMessageSummary() const;',
                   h,
                   count=1)
               if n == 0:
@@ -1204,7 +1203,8 @@ jobs:
                   lambda m: m.group(1)
                       + '\n\tint _a11yFocusedLinkIndex = -1;'
                       + '\n\tHistoryItem *_a11yFocusedLinksItem = nullptr;'
-                      + '\n\tstd::vector<ClickHandlerPtr> _a11yFocusedLinks;',
+                      + '\n\tstd::vector<ClickHandlerPtr> _a11yFocusedLinks;'
+                      + '\n\tstd::vector<QString> _a11yFocusedLinkLabels;',
                   h,
                   count=1)
               if n_fields == 0:

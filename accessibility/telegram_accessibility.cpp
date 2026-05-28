@@ -132,6 +132,15 @@ bool IsQtBuiltin(const QString &qtClassName) {
         && !qtClassName.contains(QLatin1String("::"));
 }
 
+// Some technical base class names are useless/noisy for screen readers.
+// Returning them causes announcements like "Ui RpWidget" in NVDA/Narrator.
+bool IsTechnicalAccessibleName(QStringView name) {
+    return name == QLatin1String("Ui::RpWidget")
+        || name == QLatin1String("Ui:RpWidget")
+        || name == QLatin1String("RpWidget")
+        || name == QLatin1String("QWidget");
+}
+
 } // namespace
 
 // =====================================================================
@@ -494,20 +503,27 @@ QString GenericAccessible::text(QAccessible::Text t) const {
     case QAccessible::Name: {
         // Priority: accessibleName > toolTip > windowTitle > objectName
         QString name = w->accessibleName();
-        if (!name.isEmpty()) return name;
+        if (!name.isEmpty() && !IsTechnicalAccessibleName(name)) return name;
         name = w->toolTip();
         if (!name.isEmpty()) {
             name.remove(QRegularExpression("<[^>]*>"));
-            return name.trimmed();
+            name = name.trimmed();
+            if (!name.isEmpty() && !IsTechnicalAccessibleName(name)) {
+                return name;
+            }
         }
         name = w->windowTitle();
-        if (!name.isEmpty()) return name;
+        if (!name.isEmpty() && !IsTechnicalAccessibleName(name)) return name;
         name = w->objectName();
         if (!name.isEmpty()) {
             name.replace('_', ' ');
-            return name;
+            name = name.trimmed();
+            if (!name.isEmpty() && !IsTechnicalAccessibleName(name)) {
+                return name;
+            }
         }
-        return QString::fromUtf8(w->metaObject()->className());
+        const auto className = QString::fromUtf8(w->metaObject()->className());
+        return IsTechnicalAccessibleName(className) ? QString() : className;
     }
     case QAccessible::Description:
         return w->accessibleDescription().isEmpty()

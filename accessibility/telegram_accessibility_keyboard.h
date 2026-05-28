@@ -399,10 +399,15 @@ inline void SpeakForced(const QString &text) {
     EnsureLoaded();
     if (text.isEmpty()) return;
 
+    // The row names coming from lib_ui may contain newlines and wide
+    // whitespace between row fields. NVDA's controller client is more
+    // reliable with a compact one-line phrase.
+    QString trimmed = text.simplified();
+    if (trimmed.isEmpty()) return;
+
     // Truncate but keep the meaningful prefix. NVDA reads the chat
     // title first in the lib_ui-built string, so the first ~110
     // chars are the most informative bit.
-    QString trimmed = text;
     constexpr int kMaxChars = 110;
     if (trimmed.size() > kMaxChars) {
         trimmed = trimmed.left(kMaxChars) + QStringLiteral("…");
@@ -532,6 +537,40 @@ inline QWidget *FindMainWindow() {
     return best;
 }
 
+inline QAccessibleInterface *FocusedListChild(QAccessibleInterface *iface) {
+    if (!iface) return nullptr;
+    if (auto *child = iface->focusChild()) {
+        return child;
+    }
+
+    QAccessibleInterface *active = nullptr;
+    QAccessibleInterface *selected = nullptr;
+    const int count = iface->childCount();
+    for (int i = 0; i < count; ++i) {
+        auto *child = iface->child(i);
+        if (!child) continue;
+        const auto state = child->state();
+        if (state.focused) {
+            return child;
+        }
+        if (!active && state.active) {
+            active = child;
+        }
+        if (!selected && state.selected) {
+            selected = child;
+        }
+    }
+    return active ? active : selected;
+}
+
+inline QAccessibleInterface *FocusedOrFirstListChild(
+        QAccessibleInterface *iface) {
+    if (auto *child = FocusedListChild(iface)) {
+        return child;
+    }
+    return (iface && iface->childCount() > 0) ? iface->child(0) : nullptr;
+}
+
 } // namespace detail
 
 class KeyboardNavigationFilter : public QObject {
@@ -632,11 +671,11 @@ protected:
                                 alive.data())) {
                             summary += QStringLiteral(
                                 " childCount=%1").arg(iface->childCount());
-                            if (auto *child = iface->focusChild()) {
+                            if (auto *child = detail::FocusedListChild(iface)) {
                                 const auto name = child->text(
                                     QAccessible::Name);
                                 summary += QStringLiteral(
-                                    " focusChild.name=\"%1\" role=%2")
+                                    " currentChild.name=\"%1\" role=%2")
                                     .arg(name)
                                     .arg(int(child->role()));
                                 // The MSAA child-id path doesn't make
@@ -697,7 +736,7 @@ protected:
                                 }
                             } else {
                                 summary += QStringLiteral(
-                                    " focusChild=nullptr");
+                                    " currentChild=nullptr");
                             }
                         } else {
                             summary += QStringLiteral(" iface=nullptr");
@@ -864,6 +903,29 @@ private:
 
         QAccessibleEvent ev(w, QAccessible::Focus);
         QAccessible::updateAccessibility(&ev);
+
+        if (detail::DynamicTypeName(w) == QLatin1String(
+                "Dialogs::InnerWidget")) {
+            QPointer<QWidget> alive(w);
+            QTimer::singleShot(0, [alive] {
+                if (!alive) return;
+                auto *iface = QAccessible::queryAccessibleInterface(
+                    alive.data());
+                auto *child = detail::FocusedOrFirstListChild(iface);
+                if (!child) {
+                    LogLine(QStringLiteral(
+                        "F6 -> chat list currentChild=nullptr"));
+                    return;
+                }
+                const auto name = child->text(QAccessible::Name);
+                LogLine(QStringLiteral(
+                    "F6 -> chat list currentChild.name=\"%1\" role=%2")
+                    .arg(name)
+                    .arg(int(child->role())));
+                nvda::SpeakForced(name);
+            });
+        }
+
         const QString line = QStringLiteral(
             "F6 -> name=\"%1\"  type=\"%2\"  className=\"%3\"")
             .arg(name,

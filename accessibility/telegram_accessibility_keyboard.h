@@ -698,7 +698,11 @@ protected:
                                 // are short enough.
                                 if (type == QLatin1String(
                                         "Dialogs::InnerWidget")) {
-                                    nvda::SpeakForced(name);
+                                    if (name != QLatin1String("Ui::RpWidget")
+                                        && name != QLatin1String(
+                                            "Ui:RpWidget")) {
+                                        nvda::SpeakForced(name);
+                                    }
 
                                     // Last resort: smuggle the chat name
                                     // into NVDA via the focused widget's

@@ -501,9 +501,13 @@ QString GenericAccessible::text(QAccessible::Text t) const {
 
     switch (t) {
     case QAccessible::Name: {
-        // Priority: accessibleName > toolTip > windowTitle > objectName
+        // Priority: accessibleName > toolTip > windowTitle > objectName.
+        // Do not fall back to metaObject()->className() for Telegram
+        // widgets: they all report "Ui::RpWidget" and NVDA would read that.
         QString name = w->accessibleName();
-        if (!name.isEmpty() && !IsTechnicalAccessibleName(name)) return name;
+        if (!name.isEmpty()) {
+            return IsTechnicalAccessibleName(name) ? QString() : name;
+        }
         name = w->toolTip();
         if (!name.isEmpty()) {
             name.remove(QRegularExpression("<[^>]*>"));
@@ -513,7 +517,9 @@ QString GenericAccessible::text(QAccessible::Text t) const {
             }
         }
         name = w->windowTitle();
-        if (!name.isEmpty() && !IsTechnicalAccessibleName(name)) return name;
+        if (!name.isEmpty() && !IsTechnicalAccessibleName(name)) {
+            return name;
+        }
         name = w->objectName();
         if (!name.isEmpty()) {
             name.replace('_', ' ');
@@ -522,8 +528,7 @@ QString GenericAccessible::text(QAccessible::Text t) const {
                 return name;
             }
         }
-        const auto className = QString::fromUtf8(w->metaObject()->className());
-        return IsTechnicalAccessibleName(className) ? QString() : className;
+        return {};
     }
     case QAccessible::Description:
         return w->accessibleDescription().isEmpty()

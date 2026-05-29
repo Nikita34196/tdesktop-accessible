@@ -106,6 +106,8 @@ jobs:
               SourceFiles/ui/accessibility/telegram_accessibility.h
               SourceFiles/ui/accessibility/telegram_accessibility_names.h
               SourceFiles/ui/accessibility/telegram_accessibility_keyboard.h
+              SourceFiles/ui/accessibility/telegram_accessibility_text.h
+              SourceFiles/ui/accessibility/telegram_accessibility_live.h
           )
           # === End accessibility layer ===
           PATCH

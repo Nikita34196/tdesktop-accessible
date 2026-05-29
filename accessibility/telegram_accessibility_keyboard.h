@@ -33,6 +33,7 @@
 #endif
 
 #include "ui/accessibility/telegram_accessibility.h"
+#include "ui/accessibility/telegram_accessibility_text.h"
 
 namespace TgAccessibility {
 
@@ -571,6 +572,14 @@ inline QAccessibleInterface *FocusedOrFirstListChild(
     return (iface && iface->childCount() > 0) ? iface->child(0) : nullptr;
 }
 
+inline int InvokeIntMethod(QObject *object, const char *method) {
+	if (!object) return 0;
+	int result = 0;
+	const bool ok = QMetaObject::invokeMethod(
+		object, method, Qt::DirectConnection, Q_RETURN_ARG(int, result));
+	return ok ? result : 0;
+}
+
 // Names that carry no user-visible meaning — skip NVDA controller speech.
 inline bool IsUselessListItemName(const QString &name) {
     return name.isEmpty()
@@ -587,6 +596,83 @@ class KeyboardNavigationFilter : public QObject {
 public:
     explicit KeyboardNavigationFilter(QObject *parent = nullptr)
         : QObject(parent) {}
+
+private:
+    int _botButtonIndex = -1;
+    QPointer<QWidget> _botKeyboardFocus;
+
+    QWidget *botKeyboardWidget() const {
+        if (QWidget *root = detail::FindMainWindow()) {
+            return detail::FindByType(root, "BotKeyboard");
+        }
+        return nullptr;
+    }
+    int botButtonCount(QWidget *kb) const {
+        return detail::InvokeIntMethod(kb, "accessibilityButtonCount");
+    }
+    QString botButtonLabel(QWidget *kb, int index) const {
+        if (!kb) return {};
+        QString label;
+        QMetaObject::invokeMethod(kb, "accessibilityButtonLabel",
+            Qt::DirectConnection, Q_RETURN_ARG(QString, label), Q_ARG(int, index));
+        return label.simplified();
+    }
+    bool botActivateButton(QWidget *kb, int index) const {
+        if (!kb) return false;
+        bool ok = false;
+        QMetaObject::invokeMethod(kb, "accessibilityActivateButton",
+            Qt::DirectConnection, Q_RETURN_ARG(bool, ok), Q_ARG(int, index));
+        return ok;
+    }
+    void announceBotButton(QWidget *kb) {
+        const int total = botButtonCount(kb);
+        if (total <= 0) { nvda::Speak(QStringLiteral("Клавиатура бота пуста")); return; }
+        if (_botButtonIndex < 0 || _botButtonIndex >= total) _botButtonIndex = 0;
+        const auto label = botButtonLabel(kb, _botButtonIndex);
+        nvda::SpeakForced(QStringLiteral("Кнопка %1 из %2: %3")
+            .arg(_botButtonIndex + 1).arg(total)
+            .arg(label.isEmpty() ? QStringLiteral("без названия") : label));
+    }
+    void focusBotKeyboard() {
+        QWidget *kb = botKeyboardWidget();
+        if (!kb || !kb->isVisible()) {
+            nvda::Speak(QStringLiteral("Клавиатура бота не открыта")); return;
+        }
+        _botKeyboardFocus = kb;
+        if (kb->focusPolicy() == Qt::NoFocus) kb->setFocusPolicy(Qt::StrongFocus);
+        kb->setFocus(Qt::ShortcutFocusReason);
+        if (_botButtonIndex < 0) _botButtonIndex = 0;
+        announceBotButton(kb);
+    }
+    void moveBotButton(int delta) {
+        QWidget *kb = botKeyboardWidget();
+        if (!kb || !kb->isVisible()) return;
+        const int total = botButtonCount(kb);
+        if (total <= 0) return;
+        if (_botButtonIndex < 0) _botButtonIndex = 0;
+        else _botButtonIndex = (_botButtonIndex + delta + total) % total;
+        announceBotButton(kb);
+    }
+    bool handleBotKeyboardKeys(QKeyEvent *ke) {
+        QWidget *kb = botKeyboardWidget();
+        if (!kb || !kb->isVisible()) return false;
+        QWidget *focused = QApplication::focusWidget();
+        const bool onKb = (focused == kb) || (focused && kb->isAncestorOf(focused))
+            || (_botKeyboardFocus && _botKeyboardFocus.data() == kb);
+        if (!onKb) return false;
+        const int key = ke->key();
+        const auto mods = ke->modifiers();
+        if (mods & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) return false;
+        if (key == Qt::Key_Return || key == Qt::Key_Enter) {
+            if (botActivateButton(kb, _botButtonIndex)) nvda::Speak(QStringLiteral("Кнопка нажата"));
+            return true;
+        }
+        if (key == Qt::Key_Right || key == Qt::Key_Down) { moveBotButton(1); return true; }
+        if (key == Qt::Key_Left || key == Qt::Key_Up) { moveBotButton(-1); return true; }
+        if (key == Qt::Key_Home) { _botButtonIndex = 0; announceBotButton(kb); return true; }
+        if (key == Qt::Key_End) { _botButtonIndex = qMax(0, botButtonCount(kb) - 1); announceBotButton(kb); return true; }
+        return false;
+    }
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override {
@@ -615,6 +701,15 @@ protected:
         const int key = ke->key();
         const auto mods = ke->modifiers();
 
+        if (key == Qt::Key_B
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            focusBotKeyboard();
+            return true;
+        }
+        if (handleBotKeyboardKeys(ke)) {
+            return true;
+        }
         // Ctrl+Shift+F6 — diagnostic: dump the widget tree now,
         // so we don't have to wait for the 10s scheduled dump.
         // Must be checked BEFORE the plain F6 case.
@@ -639,6 +734,23 @@ protected:
                     focusAndAnnounce(p.first, p.second);
                     return true;
                 }
+            }
+        }
+        if ((key == Qt::Key_Home || key == Qt::Key_End) && !(mods & ~Qt::ShiftModifier)) {
+            QWidget *focused = QApplication::focusWidget();
+            if (focused && detail::DynamicTypeName(focused) == QLatin1String("Dialogs::InnerWidget")) {
+                QPointer<QWidget> alive(focused);
+                QTimer::singleShot(0, [alive] {
+                    if (!alive) return;
+                    if (auto *iface = QAccessible::queryAccessibleInterface(alive.data())) {
+                        if (auto *child = detail::FocusedListChild(iface)) {
+                            const auto raw = child->text(QAccessible::Name);
+                            if (!detail::IsUselessListItemName(raw)) {
+                                nvda::SpeakForced(detail::CompactChatListLabel(raw));
+                            }
+                        }
+                    }
+                });
             }
         }
         // Diagnostic: log arrow keys when focus is on a list-like panel.
@@ -696,7 +808,7 @@ protected:
                                 // summaries need SpeakForced like the chat list.
                                 if (type == QLatin1String("HistoryInner")) {
                                     if (!detail::IsUselessListItemName(name)) {
-                                        nvda::SpeakForced(name);
+                                        nvda::SpeakForced(detail::CompactAccessibilityText(name));
                                     }
                                 }
                             } else {
@@ -818,7 +930,14 @@ private:
                 QStringLiteral("Сообщения") });
         }
 
-        // 3) Message input — Ui::InputField INSIDE the HistoryWidget
+        // 3) Bot keyboard when visible.
+        if (QWidget *kb = detail::FindByType(root, "BotKeyboard")) {
+            if (kb->isVisible()) {
+                out.append({ kb, QStringLiteral("Клавиатура бота") });
+            }
+        }
+
+        // 4) Message input — Ui::InputField INSIDE the HistoryWidget
         // (there are other InputFields elsewhere, e.g. dialog search).
         if (history) {
             if (QWidget *input = detail::FindByType(
@@ -890,9 +1009,16 @@ private:
                     .arg(name)
                     .arg(int(child->role())));
                 if (!detail::IsUselessListItemName(name)) {
-                    nvda::SpeakForced(name);
+                    nvda::SpeakForced(detail::CompactChatListLabel(name));
                 }
             });
+        } else if (detail::DynamicTypeName(w) == QLatin1String("BotKeyboard")) {
+            _botKeyboardFocus = w;
+            _botButtonIndex = 0;
+            const int total = botButtonCount(w);
+            if (total > 0) {
+                nvda::SpeakForced(QStringLiteral("Клавиатура бота, %1 кнопок").arg(total));
+            }
         }
 
         const QString line = QStringLiteral(

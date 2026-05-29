@@ -16,6 +16,7 @@
 #include "ui/accessibility/telegram_accessibility.h"
 #include "ui/accessibility/telegram_accessibility_keyboard.h"
 #include "ui/accessibility/telegram_accessibility_names.h"
+#include "ui/accessibility/telegram_accessibility_live.h"
 
 // lib_ui already ships a full Ui::Accessible framework: a QAccessibleInterface
 // factory keyed on Ui::RpWidget plus virtual accessibilityChild*() hooks on
@@ -209,6 +210,8 @@ const TypeRule kTypeRules[] = {
     { "Window::SectionWidget","Section",          QAccessible::Pane },
     { "Window::TopBarWidget", "Заголовок чата",   QAccessible::ToolBar },
     { "ComposeControls",      "Область ввода сообщения", QAccessible::Pane },
+    { "BotKeyboard",          "Клавиатура бота",         QAccessible::List },
+    { "HistoryView::TopBarWidget", "Заголовок чата",   QAccessible::ToolBar },
 };
 
 const TypeRule *MatchByTypeName(const QString &typeName) {
@@ -379,6 +382,7 @@ void Install() {
     // window exist.
     QTimer::singleShot(0, qApp, [] {
         InstallKeyboardNavigation();
+        InstallLiveAnnouncer();
     });
 
     // One-shot diagnostic dump after the UI has settled.

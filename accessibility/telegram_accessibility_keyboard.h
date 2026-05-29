@@ -695,7 +695,7 @@ protected:
                                 // Message list: MSAA often works, but long
                                 // summaries need SpeakForced like the chat list.
                                 if (type == QLatin1String("HistoryInner")) {
-                                    if (!IsUselessListItemName(name)) {
+                                    if (!detail::IsUselessListItemName(name)) {
                                         nvda::SpeakForced(name);
                                     }
                                 }
@@ -889,7 +889,7 @@ private:
                     "F6 -> chat list currentChild.name=\"%1\" role=%2")
                     .arg(name)
                     .arg(int(child->role())));
-                if (!IsUselessListItemName(name)) {
+                if (!detail::IsUselessListItemName(name)) {
                     nvda::SpeakForced(name);
                 }
             });

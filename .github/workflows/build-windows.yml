@@ -1770,7 +1770,7 @@ jobs:
               print('history_inner_widget message summary patch already applied')
 
       - name: Apply extended accessibility upstream patches
-        shell: python
+        shell: bash
         run: python accessibility-patch/scripts/a11y_upstream_patches.py
 
       # ============================================

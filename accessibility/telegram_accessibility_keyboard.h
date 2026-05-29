@@ -571,6 +571,14 @@ inline QAccessibleInterface *FocusedOrFirstListChild(
     return (iface && iface->childCount() > 0) ? iface->child(0) : nullptr;
 }
 
+// Names that carry no user-visible meaning — skip NVDA controller speech.
+inline bool IsUselessListItemName(const QString &name) {
+    return name.isEmpty()
+        || name == QLatin1String("Ui::RpWidget")
+        || name == QLatin1String("Ui:RpWidget")
+        || name == QLatin1String("RpWidget");
+}
+
 } // namespace detail
 
 class KeyboardNavigationFilter : public QObject {
@@ -627,7 +635,7 @@ protected:
         if (key == Qt::Key_Escape) {
             const auto panels = discoverPanels();
             for (const auto &p : panels) {
-                if (p.second == QLatin1String("Chats")) {
+                if (p.second == QLatin1String("Список чатов")) {
                     focusAndAnnounce(p.first, p.second);
                     return true;
                 }
@@ -678,65 +686,18 @@ protected:
                                     " currentChild.name=\"%1\" role=%2")
                                     .arg(name)
                                     .arg(int(child->role()));
-                                // The MSAA child-id path doesn't make
-                                // NVDA speak even though everything is
-                                // wired up correctly (confirmed via
-                                // tg_a11y_diag.txt). Speak the row name
-                                // directly through NVDA Controller
-                                // Client — the documented IPC channel —
-                                // so the user actually hears it.
+                                // Chat list: speech is handled in
+                                // Dialogs::InnerWidget::announceSelectedFocus
+                                // (build patch 7g: SpeakForced + NameChanged).
+                                // Duplicating SpeakForced/NameChanged here
+                                // caused double announcements and stutter.
                                 //
-                                // For chats: bypass dedupe AND truncate.
-                                // The lib_ui-built chat name strings
-                                // are very long (~180-200 chars). They
-                                // come back rc=0 from speakText but
-                                // produce no audio — strongly suggests
-                                // an internal NVDA controllerClient
-                                // length limit that just drops the
-                                // call silently. Messages go through
-                                // the normal Speak() since their names
-                                // are short enough.
-                                if (type == QLatin1String(
-                                        "Dialogs::InnerWidget")) {
-                                    if (name != QLatin1String("Ui::RpWidget")
-                                        && name != QLatin1String(
-                                            "Ui:RpWidget")) {
+                                // Message list: MSAA often works, but long
+                                // summaries need SpeakForced like the chat list.
+                                if (type == QLatin1String("HistoryInner")) {
+                                    if (!IsUselessListItemName(name)) {
                                         nvda::SpeakForced(name);
                                     }
-
-                                    // Last resort: smuggle the chat name
-                                    // into NVDA via the focused widget's
-                                    // OWN accessible name + a NameChanged
-                                    // event. NVDA reliably re-reads the
-                                    // focused widget's name when it sees
-                                    // EVENT_OBJECT_NAMECHANGE on it — this
-                                    // bypasses both the dead controller
-                                    // client and the child-id dedup that
-                                    // suppresses our per-row Focus events
-                                    // in the chat list. We confirmed the
-                                    // path works for HistoryInner via
-                                    // MSAA focus, and that NVDA+Shift+M
-                                    // can read the chat list focus,
-                                    // meaning NVDA has the data — it just
-                                    // refuses to auto-announce child-id
-                                    // changes on Dialogs::InnerWidget.
-                                    // NameChanged on the focused parent
-                                    // is the one event NVDA can\'t dedup
-                                    // away, since each new chat name is
-                                    // a fresh string.
-                                    QString shortName = name;
-                                    constexpr int kMax = 110;
-                                    if (shortName.size() > kMax) {
-                                        shortName = shortName.left(kMax)
-                                            + QStringLiteral("…");
-                                    }
-                                    alive->setAccessibleName(shortName);
-                                    QAccessibleEvent nameEv(alive.data(),
-                                        QAccessible::NameChanged);
-                                    QAccessible::updateAccessibility(
-                                        &nameEv);
-                                } else {
-                                    nvda::Speak(name);
                                 }
                             } else {
                                 summary += QStringLiteral(
@@ -844,7 +805,8 @@ private:
         if (auto *outer = detail::FindByType(root, "Dialogs::Widget")) {
             QWidget *focusTarget = detail::FindByType(
                 outer, "Dialogs::InnerWidget");
-            out.append({ focusTarget ? focusTarget : outer, "Chats" });
+            out.append({ focusTarget ? focusTarget : outer,
+                QStringLiteral("Список чатов") });
         }
 
         // 2) Message history — focus the inner scrollable list.
@@ -852,7 +814,8 @@ private:
         if (history) {
             QWidget *focusTarget = detail::FindByType(
                 history, "HistoryInner");
-            out.append({ focusTarget ? focusTarget : history, "Messages" });
+            out.append({ focusTarget ? focusTarget : history,
+                QStringLiteral("Сообщения") });
         }
 
         // 3) Message input — Ui::InputField INSIDE the HistoryWidget
@@ -860,7 +823,7 @@ private:
         if (history) {
             if (QWidget *input = detail::FindByType(
                     history, "Ui::InputField")) {
-                out.append({ input, "Message input" });
+                out.append({ input, QStringLiteral("Поле ввода") });
             }
         }
 
@@ -926,7 +889,9 @@ private:
                     "F6 -> chat list currentChild.name=\"%1\" role=%2")
                     .arg(name)
                     .arg(int(child->role())));
-                nvda::SpeakForced(name);
+                if (!IsUselessListItemName(name)) {
+                    nvda::SpeakForced(name);
+                }
             });
         }
 

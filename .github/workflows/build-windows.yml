@@ -344,6 +344,7 @@ jobs:
                   '\tQAccessible::State accessibilityChildState(int index) const override;\n'
                   '\tQAccessible::Role accessibilityChildRole() const override;\n'
                   '\tQRect accessibilityChildRect(int index) const override;\n'
+                  '\tQString a11yMessageSummaryForView(not_null<Element*> view) const;\n'
               )
               h, n = re.subn(
                   r'(~HistoryInner\s*\(\s*\)\s*;)',
@@ -426,7 +427,55 @@ jobs:
               '\tif (!view) {\n'
               '\t\treturn QString();\n'
               '\t}\n'
-              '\treturn view->data()->notificationText().text;\n'
+              '\treturn a11yMessageSummaryForView(view);\n'
+              '}\n'
+              '\n'
+              'QString HistoryInner::a11yMessageSummaryForView(\n'
+              '\t\tnot_null<Element*> view) const {\n'
+              '\tconstexpr int kMaxSummaryChars = 160;\n'
+              '\tauto parts = QStringList();\n'
+              '\tif (const auto item = view->data()) {\n'
+              '\t\tif (const auto from = item->from()) {\n'
+              '\t\t\tconst auto sender = from->name();\n'
+              '\t\t\tif (!sender.isEmpty()) {\n'
+              '\t\t\t\tparts.push_back(sender);\n'
+              '\t\t\t}\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\tconst auto active = HistoryView::ActiveMessageSubItems(view, _history);\n'
+              '\tfor (const auto subItem : active) {\n'
+              '\t\tif (subItem == HistoryView::MessageSubItem::Message) {\n'
+              '\t\t\tcontinue;\n'
+              '\t\t}\n'
+              '\t\tauto value = HistoryView::MessageSubItemValue(\n'
+              '\t\t\tview,\n'
+              '\t\t\t_history,\n'
+              '\t\t\tsubItem).simplified();\n'
+              '\t\tif (value.isEmpty()) {\n'
+              '\t\t\tcontinue;\n'
+              '\t\t}\n'
+              '\t\tconst auto label = HistoryView::MessageSubItemLabel(subItem).simplified();\n'
+              '\t\tparts.push_back(label.isEmpty()\n'
+              '\t\t\t? value\n'
+              '\t\t\t: (label + QStringLiteral(": ") + value));\n'
+              '\t\tif (parts.size() >= 6) {\n'
+              '\t\t\tbreak;\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\tif (parts.isEmpty()) {\n'
+              '\t\tconst auto message = HistoryView::MessageSubItemValue(\n'
+              '\t\t\tview,\n'
+              '\t\t\t_history,\n'
+              '\t\t\tHistoryView::MessageSubItem::Message).simplified();\n'
+              '\t\tif (!message.isEmpty()) {\n'
+              '\t\t\tparts.push_back(message.left(120));\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\tauto result = parts.join(QStringLiteral(", "));\n'
+              '\tif (result.isEmpty()) {\n'
+              '\t\tresult = view->data()->notificationText().text.simplified();\n'
+              '\t}\n'
+              '\treturn result.left(kMaxSummaryChars);\n'
               '}\n'
               '\n'
               'QAccessible::State HistoryInner::accessibilityChildState(int index) const {\n'
@@ -1152,11 +1201,23 @@ jobs:
                           + '\n\tvoid a11yMoveFocusedLink(int delta);'
                           + '\n\tstd::vector<ClickHandlerPtr> a11yCollectFocusedLinks();'
                           + '\n\tQString a11yFocusedLinkLabel(int index, int total) const;'
-                          + '\n\tQString a11yFocusedMessageSummary() const;',
+                          + '\n\tQString a11yFocusedMessageSummary() const;'
+                          + '\n\tQString a11yMessageSummaryForView(not_null<Element*> view) const;',
                       h,
                       count=1)
                   if n == 0:
                       print('ERROR: a11yActivateFocused declaration landmark not found')
+                      exit(1)
+                  changed_h = True
+              elif 'a11yMessageSummaryForView' not in h:
+                  h, n = re.subn(
+                      r'(QString\s+a11yFocusedMessageSummary\s*\(\s*\)\s*const\s*;)',
+                      lambda m: m.group(1)
+                          + '\n\tQString a11yMessageSummaryForView(not_null<Element*> view) const;',
+                      h,
+                      count=1)
+                  if n == 0:
+                      print('ERROR: a11yFocusedMessageSummary declaration not found')
                       exit(1)
                   changed_h = True
               if '_a11yFocusedLinkLabels' not in h:
@@ -1191,7 +1252,8 @@ jobs:
                       + '\n\tvoid a11yMoveFocusedLink(int delta);'
                       + '\n\tstd::vector<ClickHandlerPtr> a11yCollectFocusedLinks();'
                       + '\n\tQString a11yFocusedLinkLabel(int index, int total) const;'
-                      + '\n\tQString a11yFocusedMessageSummary() const;',
+                      + '\n\tQString a11yFocusedMessageSummary() const;'
+                      + '\n\tQString a11yMessageSummaryForView(not_null<Element*> view) const;',
                   h,
                   count=1)
               if n == 0:
@@ -1391,28 +1453,31 @@ jobs:
               return result;
           }
 
-          QString HistoryInner::a11yFocusedMessageSummary() const {
-              if (!_accessibilityFocusedItem) {
-                  return QString();
-              }
-              const auto view = viewByItem(_accessibilityFocusedItem);
-              if (!view) {
-                  return QString();
-              }
+          QString HistoryInner::a11yMessageSummaryForView(
+                  not_null<Element*> view) const {
+              constexpr int kMaxSummaryChars = 160;
               auto parts = QStringList();
+              if (const auto item = view->data()) {
+                  if (const auto from = item->from()) {
+                      const auto sender = from->name();
+                      if (!sender.isEmpty()) {
+                          parts.push_back(sender);
+                      }
+                  }
+              }
               const auto active = HistoryView::ActiveMessageSubItems(view, _history);
-              for (const auto item : active) {
-                  if (item == HistoryView::MessageSubItem::Message) {
+              for (const auto subItem : active) {
+                  if (subItem == HistoryView::MessageSubItem::Message) {
                       continue;
                   }
                   auto value = HistoryView::MessageSubItemValue(
                       view,
                       _history,
-                      item).simplified();
+                      subItem).simplified();
                   if (value.isEmpty()) {
                       continue;
                   }
-                  const auto label = HistoryView::MessageSubItemLabel(item).simplified();
+                  const auto label = HistoryView::MessageSubItemLabel(subItem).simplified();
                   parts.push_back(label.isEmpty()
                       ? value
                       : (label + QStringLiteral(": ") + value));
@@ -1429,7 +1494,22 @@ jobs:
                       parts.push_back(message.left(120));
                   }
               }
-              return parts.join(QStringLiteral(", "));
+              auto result = parts.join(QStringLiteral(", "));
+              if (result.isEmpty()) {
+                  result = view->data()->notificationText().text.simplified();
+              }
+              return result.left(kMaxSummaryChars);
+          }
+
+          QString HistoryInner::a11yFocusedMessageSummary() const {
+              if (!_accessibilityFocusedItem) {
+                  return QString();
+              }
+              const auto view = viewByItem(_accessibilityFocusedItem);
+              if (!view) {
+                  return QString();
+              }
+              return a11yMessageSummaryForView(view);
           }
 
           void HistoryInner::a11yMoveFocusedLink(int delta) {
@@ -1544,6 +1624,148 @@ jobs:
           with open(cpp_path, 'w', encoding='utf-8') as f:
               f.write(cpp)
           print('history_inner_widget.cpp patched (Enter-activate)')
+
+      # ============================================
+      # 7h. Rich message labels for arrow-key navigation.
+      #     Step 7b may be skipped when upstream already ships
+      #     accessibilityChild*(); step 7f adds link navigation but
+      #     leaves accessibilityChildName on notificationText() unless
+      #     we patch it here. Idempotent: safe when 7b already injected
+      #     a11yMessageSummaryForView.
+      # ============================================
+      - name: Patch HistoryInner message summaries for NVDA
+        shell: python
+        run: |
+          import os, re
+
+          h_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.h'
+          cpp_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.cpp'
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skipping message summary patch')
+                  exit(0)
+
+          summary_fn = r'''
+          QString HistoryInner::a11yMessageSummaryForView(
+                  not_null<Element*> view) const {
+              constexpr int kMaxSummaryChars = 160;
+              auto parts = QStringList();
+              if (const auto item = view->data()) {
+                  if (const auto from = item->from()) {
+                      const auto sender = from->name();
+                      if (!sender.isEmpty()) {
+                          parts.push_back(sender);
+                      }
+                  }
+              }
+              const auto active = HistoryView::ActiveMessageSubItems(view, _history);
+              for (const auto subItem : active) {
+                  if (subItem == HistoryView::MessageSubItem::Message) {
+                      continue;
+                  }
+                  auto value = HistoryView::MessageSubItemValue(
+                      view,
+                      _history,
+                      subItem).simplified();
+                  if (value.isEmpty()) {
+                      continue;
+                  }
+                  const auto label = HistoryView::MessageSubItemLabel(subItem).simplified();
+                  parts.push_back(label.isEmpty()
+                      ? value
+                      : (label + QStringLiteral(": ") + value));
+                  if (parts.size() >= 6) {
+                      break;
+                  }
+              }
+              if (parts.isEmpty()) {
+                  const auto message = HistoryView::MessageSubItemValue(
+                      view,
+                      _history,
+                      HistoryView::MessageSubItem::Message).simplified();
+                  if (!message.isEmpty()) {
+                      parts.push_back(message.left(120));
+                  }
+              }
+              auto result = parts.join(QStringLiteral(", "));
+              if (result.isEmpty()) {
+                  result = view->data()->notificationText().text.simplified();
+              }
+              return result.left(kMaxSummaryChars);
+          }
+          '''
+
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'a11yMessageSummaryForView' not in h:
+              if 'a11yFocusedMessageSummary' in h:
+                  h, n = re.subn(
+                      r'(QString\s+a11yFocusedMessageSummary\s*\(\s*\)\s*const\s*;)',
+                      lambda m: m.group(1)
+                          + '\n\tQString a11yMessageSummaryForView(not_null<Element*> view) const;',
+                      h,
+                      count=1)
+              elif 'accessibilityChildName' in h:
+                  h, n = re.subn(
+                      r'(QString\s+accessibilityChildName\s*\(\s*int\s+index\s*\)\s*const\s+override\s*;)',
+                      lambda m: m.group(1)
+                          + '\n\tQString a11yMessageSummaryForView(not_null<Element*> view) const;',
+                      h,
+                      count=1)
+              else:
+                  n = 0
+              if n:
+                  with open(h_path, 'w', encoding='utf-8') as f:
+                      f.write(h)
+                  print('history_inner_widget.h: added a11yMessageSummaryForView declaration')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          changed = False
+
+          if 'a11yMessageSummaryForView' not in cpp:
+              cpp = cpp.rstrip() + '\n' + summary_fn
+              changed = True
+              print('history_inner_widget.cpp: appended a11yMessageSummaryForView')
+
+          old_child_name = (
+              'return view->data()->notificationText().text;')
+          new_child_name = 'return a11yMessageSummaryForView(view);'
+          if old_child_name in cpp:
+              cpp = cpp.replace(old_child_name, new_child_name)
+              changed = True
+              print('history_inner_widget.cpp: accessibilityChildName uses summary')
+
+          old_summary = re.compile(
+              r'QString HistoryInner::a11yFocusedMessageSummary\(\) const \{[^}]+\}[^}]*\}',
+              re.DOTALL)
+          if 'a11yFocusedMessageSummary' in cpp and 'a11yMessageSummaryForView(view)' not in cpp:
+              replacement = (
+                  'QString HistoryInner::a11yFocusedMessageSummary() const {\n'
+                  '\tif (!_accessibilityFocusedItem) {\n'
+                  '\t\treturn QString();\n'
+                  '\t}\n'
+                  '\tconst auto view = viewByItem(_accessibilityFocusedItem);\n'
+                  '\tif (!view) {\n'
+                  '\t\treturn QString();\n'
+                  '\t}\n'
+                  '\treturn a11yMessageSummaryForView(view);\n'
+                  '}\n'
+              )
+              cpp2, n = old_summary.subn(replacement, cpp, count=1)
+              if n:
+                  cpp = cpp2
+                  changed = True
+                  print('history_inner_widget.cpp: a11yFocusedMessageSummary delegates')
+
+          if changed:
+              with open(cpp_path, 'w', encoding='utf-8') as f:
+                  f.write(cpp)
+          else:
+              print('history_inner_widget message summary patch already applied')
 
       # ============================================
       # 8. Cache third-party libraries
@@ -1913,8 +2135,11 @@ jobs:
             - **F6 / Shift+F6** — переключение между панелями
               (Чаты ↔ Сообщения ↔ Поле ввода)
             - **Стрелки вверх/вниз** — навигация по списку чатов и
-              сообщениям (NVDA / экранный диктор Windows)
+              сообщениям (имя отправителя + текст/вложение)
+            - **Tab / Shift+Tab** — ссылки и вложения в выбранном сообщении
+            - **Enter** — открыть вложение или воспроизвести медиа
             - **Ctrl+Shift+R** — записать / отправить голосовое сообщение
+            - **Ctrl+Shift+T** — тест озвучки NVDA
             - **Escape** — вернуться в список чатов
             - **Ctrl+Shift+F6** — диагностический дамп дерева виджетов
               (для отчётов о проблемах)

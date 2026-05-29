@@ -15,6 +15,7 @@
 //     learning what real type names show up in a given build.
 #include "ui/accessibility/telegram_accessibility.h"
 #include "ui/accessibility/telegram_accessibility_keyboard.h"
+#include "ui/accessibility/telegram_accessibility_names.h"
 
 // lib_ui already ships a full Ui::Accessible framework: a QAccessibleInterface
 // factory keyed on Ui::RpWidget plus virtual accessibilityChild*() hooks on
@@ -159,16 +160,16 @@ struct TypeRule {
 
 const TypeRule kTypeRules[] = {
     // -- Major panels --
-    { "Dialogs::Widget",      "Chat list panel",  QAccessible::Pane },
-    { "Dialogs::InnerWidget", "Chats",            QAccessible::List },
-    { "HistoryWidget",        "Chat",             QAccessible::Pane },
-    { "HistoryInner",         "Messages",         QAccessible::List },
-    { "Window::MainMenu",     "Main menu",        QAccessible::Pane },
-    { "MainWidget",           "Main area",        QAccessible::Pane },
-    { "Window::MainWindow",   "Telegram",         QAccessible::Window },
+    { "Dialogs::Widget",      "Панель списка чатов", QAccessible::Pane },
+    { "Dialogs::InnerWidget", "Список чатов",        QAccessible::List },
+    { "HistoryWidget",        "Чат",                 QAccessible::Pane },
+    { "HistoryInner",         "Сообщения",           QAccessible::List },
+    { "Window::MainMenu",     "Главное меню",        QAccessible::Pane },
+    { "MainWidget",           "Основная область",    QAccessible::Pane },
+    { "Window::MainWindow",   "Telegram",            QAccessible::Window },
 
     // -- Inputs --
-    { "Ui::InputField",       nullptr,            QAccessible::EditableText },
+    { "Ui::InputField",       "Введите сообщение",   QAccessible::EditableText },
     { "Ui::FlatInput",        nullptr,            QAccessible::EditableText },
     { "Ui::FlatTextarea",     nullptr,            QAccessible::EditableText },
     { "Ui::NumberInput",      "Number",           QAccessible::EditableText },
@@ -181,7 +182,8 @@ const TypeRule kTypeRules[] = {
     { "Ui::FlatButton",       nullptr,            QAccessible::PushButton },
     { "Ui::LinkButton",       nullptr,            QAccessible::Link },
     { "Ui::SettingsButton",   nullptr,            QAccessible::PushButton },
-    { "Ui::EmojiButton",      nullptr,            QAccessible::PushButton },
+    { "AttachButton",         "Прикрепить файл",  QAccessible::PushButton },
+    { "Ui::EmojiButton",      "Эмодзи и стикеры", QAccessible::PushButton },
     { "Ui::CrossButton",      nullptr,            QAccessible::PushButton },
     { "Ui::JumpDownButton",   nullptr,            QAccessible::PushButton },
     { "Ui::SendButton",       "Отправить",        QAccessible::PushButton },
@@ -205,7 +207,8 @@ const TypeRule kTypeRules[] = {
     { "Ui::LayerWidget",      "Dialog",           QAccessible::Dialog },
     { "Ui::BoxContent",       nullptr,            QAccessible::Pane },
     { "Window::SectionWidget","Section",          QAccessible::Pane },
-    { "Window::TopBarWidget", "Chat header",      QAccessible::ToolBar },
+    { "Window::TopBarWidget", "Заголовок чата",   QAccessible::ToolBar },
+    { "ComposeControls",      "Область ввода сообщения", QAccessible::Pane },
 };
 
 const TypeRule *MatchByTypeName(const QString &typeName) {
@@ -382,6 +385,17 @@ void Install() {
     QTimer::singleShot(10000, qApp, [] {
         DumpWidgetTree();
     });
+
+    // Apply human-readable names once the main window and compose
+    // controls exist. Retries catch late-created widgets after sign-in.
+    const auto applyNames = [] {
+        if (QWidget *root = TgAccessibility::detail::FindMainWindow()) {
+            ApplyNames(root);
+            Log(QStringLiteral("[TgAccessibility] ApplyNames() on main window"));
+        }
+    };
+    QTimer::singleShot(3000, qApp, applyNames);
+    QTimer::singleShot(8000, qApp, applyNames);
 
     qDebug() << "[TgAccessibility] Screen-reader accessibility layer installed.";
 }
@@ -615,7 +629,7 @@ QString InputFieldAccessible::text(QAccessible::Text t) const {
         QString name = GenericAccessible::text(t);
         if (name.isEmpty()
             || name == QString::fromUtf8(widget()->metaObject()->className())) {
-            return QStringLiteral("Message input");
+            return QStringLiteral("Поле ввода");
         }
         return name;
     }

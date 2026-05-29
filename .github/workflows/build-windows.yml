@@ -1769,6 +1769,10 @@ jobs:
           else:
               print('history_inner_widget message summary patch already applied')
 
+      - name: Apply extended accessibility upstream patches
+        shell: python
+        run: python accessibility-patch/scripts/a11y_upstream_patches.py
+
       # ============================================
       # 8. Cache third-party libraries
       # ============================================
@@ -2141,7 +2145,9 @@ jobs:
             - **Tab / Shift+Tab** — ссылки и вложения в выбранном сообщении
             - **Enter** — открыть вложение или воспроизвести медиа
             - **Ctrl+Shift+R** — записать / отправить голосовое сообщение
+            - **Ctrl+Shift+B** — клавиатура бота (стрелки, Enter)
             - **Ctrl+Shift+T** — тест озвучки NVDA
+            - **Home / End** — первый / последний чат в списке
             - **Escape** — вернуться в список чатов
             - **Ctrl+Shift+F6** — диагностический дамп дерева виджетов
               (для отчётов о проблемах)

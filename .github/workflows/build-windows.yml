@@ -1,0 +1,2157 @@
+# Build Telegram Desktop with Accessibility for Screen Readers
+name: Windows Accessible Build
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ['v*']
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    # softprops/action-gh-release needs write access on `contents` to create
+    # the Release and upload Telegram.exe. The default GITHUB_TOKEN is
+    # read-only for forks / private orgs unless we grant it explicitly,
+    # which is why the v1.0.0 attempt failed with
+    # "Resource not accessible by integration".
+    permissions:
+      contents: write
+
+    env:
+      REPO_NAME: tdesktop
+
+    steps:
+      # ============================================
+      # 1. Checkout OUR repo (with accessibility files)
+      # ============================================
+      - name: Checkout accessibility repo
+        uses: actions/checkout@v4
+        with:
+          path: accessibility-patch
+
+      # ============================================
+      # 2. Set up Visual Studio environment
+      # ============================================
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # ============================================
+      # 3. Install build tools
+      # ============================================
+      - name: Install tools
+        run: |
+          choco install --no-progress -y nasm yasm jom ninja
+
+      - name: Add tools to PATH
+        shell: bash
+        run: |
+          echo "C:\ProgramData\chocolatey\lib\nasm\tools" >> $GITHUB_PATH
+          echo "C:\ProgramData\chocolatey\lib\yasm\tools" >> $GITHUB_PATH
+          echo "C:\ProgramData\chocolatey\lib\jom\tools" >> $GITHUB_PATH
+
+      # ============================================
+      # 4. Clone official Telegram Desktop
+      # ============================================
+      - name: Clone Telegram Desktop
+        shell: bash
+        run: |
+          git clone --recursive https://github.com/telegramdesktop/tdesktop.git $REPO_NAME
+
+      - name: Get repository info
+        shell: bash
+        run: |
+          cd $REPO_NAME
+          echo "TDESKTOP_VERSION=$(git describe --tags --always)" >> $GITHUB_ENV
+          echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      # ============================================
+      # 5. Copy accessibility files into source tree
+      # ============================================
+      - name: Install accessibility layer
+        shell: bash
+        run: |
+          mkdir -p $REPO_NAME/Telegram/SourceFiles/ui/accessibility
+          cp accessibility-patch/accessibility/*.h   $REPO_NAME/Telegram/SourceFiles/ui/accessibility/
+          cp accessibility-patch/accessibility/*.cpp  $REPO_NAME/Telegram/SourceFiles/ui/accessibility/
+
+      # ============================================
+      # 6. Patch CMakeLists.txt
+      # ============================================
+      - name: Patch CMakeLists.txt
+        shell: bash
+        run: |
+          CMAKEFILE="$REPO_NAME/Telegram/CMakeLists.txt"
+
+          if ! grep -q "telegram_simple_accessibility" "$CMAKEFILE"; then
+            cat >> "$CMAKEFILE" << 'PATCH'
+
+          # === Accessibility layer for screen readers (NVDA/JAWS/Narrator) ===
+          target_sources(Telegram
+          PRIVATE
+              SourceFiles/ui/accessibility/telegram_simple_accessibility.cpp
+              SourceFiles/ui/accessibility/telegram_simple_accessibility.h
+              SourceFiles/ui/accessibility/telegram_simple_names.h
+              SourceFiles/ui/accessibility/telegram_simple_keyboard.h
+              SourceFiles/ui/accessibility/telegram_simple_speech.h
+              SourceFiles/ui/accessibility/telegram_simple_live.h
+          )
+          # === End accessibility layer ===
+          PATCH
+            echo "CMakeLists.txt patched successfully"
+          else
+            echo "CMakeLists.txt already patched"
+          fi
+
+      # ============================================
+      # 6b. Make QRhi shader compilation optional.
+      #
+      # Upstream tdesktop (commit e75dba5, the "thanos" particle
+      # dissolution effect) ships GLSL shaders under Telegram/shaders/
+      # and Telegram/cmake/qrhi_shaders.cmake hard-fails the whole
+      # CMake configure with message(FATAL_ERROR ...) if the QSB tool
+      # (Qt Shader Baker) isn't on PATH. QSB lives in Qt's shadertools
+      # module, which tdesktop's prepare.py doesn't build, so our
+      # configure step dies before it even starts (builds 70202372375
+      # and 70216217792 both failed exactly here).
+      #
+      # We don't need the thanos effect — it's a purely cosmetic
+      # message-deletion animation. Rewrite the FATAL_ERROR branch into
+      # message(STATUS ...) + return(), which cleanly skips shader
+      # compilation. return() exits the include()'d file early so the
+      # rest of qrhi_shaders.cmake (which would invoke the missing QSB)
+      # never runs; Telegram still builds, just without the GPU
+      # particle shaders.
+      # ============================================
+      - name: Make QRhi shaders optional
+        shell: python
+        run: |
+          import os, re
+
+          path = 'tdesktop/Telegram/cmake/qrhi_shaders.cmake'
+          if not os.path.exists(path):
+              print(f'{path} not present — nothing to patch (upstream '
+                    'may have removed the shader requirement)')
+              exit(0)
+
+          with open(path, 'r', encoding='utf-8') as f:
+              src = f.read()
+
+          if 'accessibility-patch' in src:
+              print('qrhi_shaders.cmake already patched')
+              exit(0)
+
+          # Match the whole `if (NOT QSB_EXECUTABLE) ... endif()` block.
+          # Non-greedy + count=1 grabs the first (and only) one.
+          pattern = (
+              r'if\s*\(\s*NOT\s+QSB_EXECUTABLE\s*\)'
+              r'.*?'
+              r'endif\s*\(\s*\)'
+          )
+          replacement = (
+              'if (NOT QSB_EXECUTABLE)\n'
+              '    # accessibility-patch: QSB (Qt Shader Baker) is not\n'
+              '    # available in this build environment. Skip QRhi\n'
+              '    # shader compilation instead of failing configure.\n'
+              '    message(STATUS\n'
+              '        "accessibility-patch: QSB not found, skipping "\n'
+              '        "QRhi shader compilation (thanos effect disabled)")\n'
+              '    return()\n'
+              'endif()'
+          )
+          src2, n = re.subn(pattern, replacement, src,
+                            count=1, flags=re.DOTALL)
+          if n == 0:
+              print('WARNING: QSB_EXECUTABLE guard block not found — '
+                    'upstream qrhi_shaders.cmake shape changed. '
+                    'Leaving file untouched; configure may still fail.')
+              exit(0)
+
+          with open(path, 'w', encoding='utf-8') as f:
+              f.write(src2)
+          print('qrhi_shaders.cmake patched — shader compilation now '
+                'optional')
+
+      # ============================================
+      # 7. Patch Application startup
+      # ============================================
+      - name: Patch Application init
+        shell: python
+        run: |
+          import os, re, glob
+
+          # Find application.cpp
+          app_cpp = None
+          for pattern in [
+              'tdesktop/Telegram/SourceFiles/core/application.cpp',
+              'tdesktop/Telegram/SourceFiles/application.cpp',
+          ]:
+              matches = glob.glob(pattern)
+              if matches:
+                  app_cpp = matches[0]
+                  break
+
+          if not app_cpp:
+              # Search recursively
+              for root, dirs, files in os.walk('tdesktop/Telegram/SourceFiles'):
+                  for f in files:
+                      if f == 'application.cpp' and 'core' in root:
+                          app_cpp = os.path.join(root, f)
+                          break
+                  if app_cpp:
+                      break
+
+          if not app_cpp:
+              print("WARNING: application.cpp not found!")
+              exit(0)
+
+          print(f"Found: {app_cpp}")
+
+          with open(app_cpp, 'r', encoding='utf-8') as f:
+              content = f.read()
+
+          if 'TgSimpleA11y' in content:
+              print('Already patched')
+              exit(0)
+
+          # Add include after the last #include
+          include_block = (
+              '\n// Accessibility for NVDA / screen readers\n'
+              '#include "ui/accessibility/telegram_simple_accessibility.h"\n'
+              '#include "ui/accessibility/telegram_simple_names.h"\n'
+          )
+
+          includes = list(re.finditer(r'^#include\s+.*$', content, re.MULTILINE))
+          if includes:
+              pos = includes[-1].end()
+              content = content[:pos] + include_block + content[pos:]
+
+          # Find a good place to insert Install() call
+          init_patterns = [
+              r'(Application::run\s*\([^)]*\)\s*\{)',
+              r'(Application::startMain\s*\([^)]*\)\s*\{)',
+              r'(Application::start\s*\([^)]*\)\s*\{)',
+              r'(Application::create\s*\([^)]*\)\s*\{)',
+              r'(Application::launch\s*\([^)]*\)\s*\{)',
+              r'(Application::init\s*\([^)]*\)\s*\{)',
+          ]
+
+          inserted = False
+          for pattern in init_patterns:
+              match = re.search(pattern, content, re.DOTALL)
+              if match:
+                  insert_pos = match.end()
+                  init_code = (
+                      '\n    // Install screen reader accessibility layer\n'
+                      '    TgSimpleA11y::Install();\n'
+                  )
+                  content = content[:insert_pos] + init_code + content[insert_pos:]
+                  inserted = True
+                  print(f'Inserted Install() into: {match.group(1)[:60]}')
+                  break
+
+          if not inserted:
+              # Fallback: try to find any function body in Application class
+              match = re.search(r'(Application::Application\s*\([^)]*\)\s*(?::[^{]*)?\{)', content, re.DOTALL)
+              if match:
+                  insert_pos = match.end()
+                  init_code = (
+                      '\n    // Install screen reader accessibility layer\n'
+                      '    TgSimpleA11y::Install();\n'
+                  )
+                  content = content[:insert_pos] + init_code + content[insert_pos:]
+                  inserted = True
+                  print(f'Inserted Install() into constructor')
+
+          if not inserted:
+              print('WARNING: Could not find insertion point')
+              print('Searching for any suitable function...')
+              # Last resort: just add it and hope for the best
+              match = re.search(r'void\s+Application::\w+\([^)]*\)\s*\{', content)
+              if match:
+                  insert_pos = match.end()
+                  init_code = (
+                      '\n    // Install screen reader accessibility layer\n'
+                      '    TgSimpleA11y::Install();\n'
+                  )
+                  content = content[:insert_pos] + init_code + content[insert_pos:]
+                  print(f'Inserted into: {match.group()[:60]}')
+
+          with open(app_cpp, 'w', encoding='utf-8') as f:
+              f.write(content)
+
+          print('Patch complete')
+
+      # ============================================
+      # 7b. Patch HistoryInner so screen readers can see individual messages.
+      #     Upstream Dialogs::InnerWidget already implements the
+      #     accessibilityChild*() hooks defined on Ui::RpWidget; HistoryInner
+      #     doesn't. We add the same set of overrides plus a tiny cache of
+      #     visible messages so lib_ui's Accessible::Widget wraps each
+      #     visible Element as a real QAccessibleInterface child.
+      # ============================================
+      - name: Patch HistoryInner for accessibility
+        shell: python
+        run: |
+          import os, re
+
+          h_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.h'
+          cpp_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.cpp'
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skipping HistoryInner patch')
+                  exit(0)
+
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          # Upstream tdesktop (post-87ee04c, dev branch) added its own
+          # accessibilityChildCount / Name / State / Role / Rect overrides
+          # plus full keyPressEvent navigation tracking
+          # _accessibilityFocusedItem / _accessibilityFocusedIndex. Our
+          # patch would duplicate every definition (C2084 "function already
+          # has a body" — exactly the build failure observed). Detect the
+          # upstream override and bail out entirely; lib_ui's Init() + the
+          # upstream a11y methods already do the same job our patch was
+          # meant to provide.
+          if 'accessibilityChildCount() const override' in h:
+              print('HistoryInner already has upstream accessibility — '
+                    'skipping our patch entirely')
+              exit(0)
+
+          if 'a11yRecomputeVisible' in h:
+              print('history_inner_widget.h already patched')
+          else:
+              # Inject override declarations right after `~HistoryInner();`.
+              h_methods = (
+                  '\n\n\t// === Accessibility for screen readers (NVDA / JAWS) ===\n'
+                  '\tQAccessible::Role accessibilityRole() override;\n'
+                  '\tQt::FocusPolicy accessibilityFocusPolicy() override;\n'
+                  '\tint accessibilityChildCount() const override;\n'
+                  '\tQString accessibilityChildName(int index) const override;\n'
+                  '\tQAccessible::State accessibilityChildState(int index) const override;\n'
+                  '\tQAccessible::Role accessibilityChildRole() const override;\n'
+                  '\tQRect accessibilityChildRect(int index) const override;\n'
+                  '\tQString a11yMessageSummaryForView(not_null<Element*> view) const;\n'
+              )
+              h, n = re.subn(
+                  r'(~HistoryInner\s*\(\s*\)\s*;)',
+                  lambda m: m.group(1) + h_methods,
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: ~HistoryInner() landmark not found')
+                  exit(1)
+
+              # Inject the visible-items cache field as the last member of the
+              # class. `_overlayHost;` is unique inside HistoryInner.
+              h_field = (
+                  '\n\n\t// Cache of currently visible messages, refreshed on every\n'
+                  '\t// accessibilityChildCount() query. Used by the override block above.\n'
+                  '\tstruct A11yVisibleItem {\n'
+                  '\t\tHistoryView::Element *view = nullptr;\n'
+                  '\t\tQRect rect;\n'
+                  '\t};\n'
+                  '\tmutable std::vector<A11yVisibleItem> _a11yVisibleItems;\n'
+                  '\tvoid a11yRecomputeVisible();\n'
+              )
+              h, n = re.subn(
+                  r'(std::unique_ptr<HistoryView::ElementOverlayHost>\s+_overlayHost\s*;)',
+                  lambda m: m.group(1) + h_field,
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: _overlayHost landmark not found')
+                  exit(1)
+
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('history_inner_widget.h patched')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'a11yRecomputeVisible' in cpp:
+              print('history_inner_widget.cpp already patched')
+              exit(0)
+
+          # Definitions go at the end of the file. They live in the same
+          # translation unit as the `enumerateItems` template and its
+          # `enumerateItemsInHistory` companion, so template instantiation
+          # succeeds without exposing those templates in the header.
+          impl = (
+              '\n'
+              '// === Accessibility implementations (added by accessibility-patch) ===\n'
+              'void HistoryInner::a11yRecomputeVisible() {\n'
+              '\t_a11yVisibleItems.clear();\n'
+              '\tenumerateItems<EnumItemsDirection::TopToBottom>(\n'
+              '\t\t[&](not_null<Element*> view, int itemtop, int itembottom) {\n'
+              '\t\t\t_a11yVisibleItems.push_back({\n'
+              '\t\t\t\tview.get(),\n'
+              '\t\t\t\tQRect(0, itemtop, width(), itembottom - itemtop)\n'
+              '\t\t\t});\n'
+              '\t\t\treturn true;\n'
+              '\t\t});\n'
+              '}\n'
+              '\n'
+              'QAccessible::Role HistoryInner::accessibilityRole() {\n'
+              '\treturn QAccessible::List;\n'
+              '}\n'
+              '\n'
+              'Qt::FocusPolicy HistoryInner::accessibilityFocusPolicy() {\n'
+              '\treturn Qt::TabFocus;\n'
+              '}\n'
+              '\n'
+              'int HistoryInner::accessibilityChildCount() const {\n'
+              '\tconst_cast<HistoryInner*>(this)->a11yRecomputeVisible();\n'
+              '\treturn int(_a11yVisibleItems.size());\n'
+              '}\n'
+              '\n'
+              'QString HistoryInner::accessibilityChildName(int index) const {\n'
+              '\tif (index < 0 || index >= int(_a11yVisibleItems.size())) {\n'
+              '\t\treturn QString();\n'
+              '\t}\n'
+              '\tconst auto view = _a11yVisibleItems[index].view;\n'
+              '\tif (!view) {\n'
+              '\t\treturn QString();\n'
+              '\t}\n'
+              '\treturn a11yMessageSummaryForView(view);\n'
+              '}\n'
+              '\n'
+              'QString HistoryInner::a11yMessageSummaryForView(\n'
+              '\t\tnot_null<Element*> view) const {\n'
+              '\tconstexpr int kMaxSummaryChars = 160;\n'
+              '\tauto parts = QStringList();\n'
+              '\tif (const auto item = view->data()) {\n'
+              '\t\tif (const auto from = item->from()) {\n'
+              '\t\t\tconst auto sender = from->name();\n'
+              '\t\t\tif (!sender.isEmpty()) {\n'
+              '\t\t\t\tparts.push_back(sender);\n'
+              '\t\t\t}\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\tconst auto active = HistoryView::ActiveMessageSubItems(view, _history);\n'
+              '\tfor (const auto subItem : active) {\n'
+              '\t\tif (subItem == HistoryView::MessageSubItem::Message) {\n'
+              '\t\t\tcontinue;\n'
+              '\t\t}\n'
+              '\t\tauto value = HistoryView::MessageSubItemValue(\n'
+              '\t\t\tview,\n'
+              '\t\t\t_history,\n'
+              '\t\t\tsubItem).simplified();\n'
+              '\t\tif (value.isEmpty()) {\n'
+              '\t\t\tcontinue;\n'
+              '\t\t}\n'
+              '\t\tconst auto label = HistoryView::MessageSubItemLabel(subItem).simplified();\n'
+              '\t\tparts.push_back(label.isEmpty()\n'
+              '\t\t\t? value\n'
+              '\t\t\t: (label + QStringLiteral(": ") + value));\n'
+              '\t\tif (parts.size() >= 6) {\n'
+              '\t\t\tbreak;\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\tif (parts.isEmpty()) {\n'
+              '\t\tconst auto message = HistoryView::MessageSubItemValue(\n'
+              '\t\t\tview,\n'
+              '\t\t\t_history,\n'
+              '\t\t\tHistoryView::MessageSubItem::Message).simplified();\n'
+              '\t\tif (!message.isEmpty()) {\n'
+              '\t\t\tparts.push_back(message.left(120));\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\tauto result = parts.join(QStringLiteral(", "));\n'
+              '\tif (result.isEmpty()) {\n'
+              '\t\tresult = view->data()->notificationText().text.simplified();\n'
+              '\t}\n'
+              '\treturn result.left(kMaxSummaryChars);\n'
+              '}\n'
+              '\n'
+              'QAccessible::State HistoryInner::accessibilityChildState(int index) const {\n'
+              '\tauto state = QAccessible::State();\n'
+              '\tstate.selectable = true;\n'
+              '\tstate.focusable = true;\n'
+              '\treturn state;\n'
+              '}\n'
+              '\n'
+              'QAccessible::Role HistoryInner::accessibilityChildRole() const {\n'
+              '\treturn QAccessible::ListItem;\n'
+              '}\n'
+              '\n'
+              'QRect HistoryInner::accessibilityChildRect(int index) const {\n'
+              '\tif (index < 0 || index >= int(_a11yVisibleItems.size())) {\n'
+              '\t\treturn QRect();\n'
+              '\t}\n'
+              '\treturn _a11yVisibleItems[index].rect;\n'
+              '}\n'
+          )
+
+          cpp = cpp.rstrip() + '\n' + impl
+          with open(cpp_path, 'w', encoding='utf-8') as f:
+              f.write(cpp)
+          print('history_inner_widget.cpp patched')
+
+      # ============================================
+      # 7c. Make Up/Down arrows step through messages for screen readers.
+      #     Mirrors what upstream Dialogs::InnerWidget already does for the
+      #     chat list (processKeyDispatch -> selectSkip -> announceSelectedFocus
+      #     -> accessibilityChildFocused(index)). HistoryInner's upstream
+      #     keyPressEvent ignores arrows entirely (they go to
+      #     _widget->tryProcessKeyInput); we intercept Up/Down/PageUp/PageDown/
+      #     Home/End only when ScreenReaderModeActive() is true, so sighted
+      #     users keep the original behavior.
+      # ============================================
+      - name: Patch HistoryInner for arrow-key a11y navigation
+        shell: python
+        run: |
+          import os, re
+
+          h_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.h'
+          cpp_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.cpp'
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skipping a11y key patch')
+                  exit(0)
+
+          # --- header: declare a11yProcessKey + _a11yCurrentIndex field ---
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          # Upstream tdesktop now ships its own keyPressEvent-driven
+          # accessibility navigation (tracks _accessibilityFocusedItem +
+          # _accessibilityFocusedIndex, calls accessibilityChildFocused on
+          # arrow keys). Step 7b just bailed for the same reason; if
+          # upstream's accessibilityChildCount override is present we
+          # have nothing left to inject here either.
+          if 'accessibilityChildCount() const override' in h:
+              print('HistoryInner already has upstream a11y navigation — '
+                    'skipping arrow-key patch')
+              exit(0)
+
+          if 'a11yProcessKey' in h:
+              print('history_inner_widget.h already patched (a11y key)')
+          else:
+              # Append the method declaration right after the existing
+              # a11yRecomputeVisible() declaration so it sits inside the
+              # same private accessibility block.
+              h, n = re.subn(
+                  r'(void\s+a11yRecomputeVisible\s*\(\s*\)\s*;)',
+                  lambda m: m.group(1) + '\n\tbool a11yProcessKey(QKeyEvent *e);\n',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: a11yRecomputeVisible landmark not found')
+                  exit(1)
+
+              # Add the current-index field next to the visible-items cache.
+              h, n = re.subn(
+                  r'(mutable std::vector<A11yVisibleItem>\s+_a11yVisibleItems\s*;)',
+                  lambda m: m.group(1) + '\n\tint _a11yCurrentIndex = -1;\n',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: _a11yVisibleItems landmark not found')
+                  exit(1)
+
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('history_inner_widget.h patched (a11y key)')
+
+          # --- cpp: inject call at top of keyPressEvent, update child state,
+          #         and append the a11yProcessKey definition. ---
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'a11yProcessKey' in cpp:
+              print('history_inner_widget.cpp already patched (a11y key)')
+              exit(0)
+
+          # Add the screen-reader-mode include if it's not already present.
+          # ScreenReaderModeActive() lives in ui/screen_reader_mode.h.
+          if 'ui/screen_reader_mode.h' not in cpp:
+              cpp, n = re.subn(
+                  r'(#include\s+"ui/[^"]+"\s*\n)(?=(?:[^#]|#[^i]))',
+                  lambda m: m.group(1) + '#include "ui/screen_reader_mode.h"\n',
+                  cpp,
+                  count=1)
+              if n == 0:
+                  # Fallback: just stick it after the first #include line.
+                  cpp, n = re.subn(
+                      r'(^#include\s+.*\n)',
+                      lambda m: m.group(1) + '#include "ui/screen_reader_mode.h"\n',
+                      cpp,
+                      count=1,
+                      flags=re.MULTILINE)
+                  if n == 0:
+                      print('ERROR: could not insert screen_reader_mode.h include')
+                      exit(1)
+
+          # Inject `if (a11yProcessKey(e)) return;` at the very top of
+          # the existing HistoryInner::keyPressEvent body. The original
+          # logic (Escape, Copy, Delete, tryProcessKeyInput, ...) stays
+          # intact and runs whenever a11yProcessKey returns false.
+          cpp, n = re.subn(
+              r'(void\s+HistoryInner::keyPressEvent\s*\(\s*QKeyEvent\s*\*\s*e\s*\)\s*\{)',
+              lambda m: m.group(1) + '\n\tif (a11yProcessKey(e)) return;',
+              cpp,
+              count=1)
+          if n == 0:
+              print('ERROR: HistoryInner::keyPressEvent landmark not found')
+              exit(1)
+
+          # Mark the currently-focused child in accessibilityChildState so
+          # NVDA reports the correct active row when it queries state.
+          cpp, n = re.subn(
+              r'(QAccessible::State HistoryInner::accessibilityChildState\(int index\) const \{\n'
+              r'\tauto state = QAccessible::State\(\);\n'
+              r'\tstate\.selectable = true;\n'
+              r'\tstate\.focusable = true;\n)',
+              lambda m: m.group(1) + (
+                  '\tif (index == _a11yCurrentIndex) {\n'
+                  '\t\tstate.focused = true;\n'
+                  '\t\tstate.selected = true;\n'
+                  '\t\tstate.active = true;\n'
+                  '\t}\n'),
+              cpp,
+              count=1)
+          if n == 0:
+              print('WARNING: accessibilityChildState landmark not found '
+                    '— focused state will not be reported')
+
+          # Append the a11yProcessKey definition. Lives in the same
+          # translation unit as a11yRecomputeVisible() so the existing
+          # enumerateItems template instantiations stay reusable.
+          impl = (
+              '\n'
+              '// === Arrow-key a11y navigation (added by accessibility-patch) ===\n'
+              'bool HistoryInner::a11yProcessKey(QKeyEvent *e) {\n'
+              '\tif (!Ui::ScreenReaderModeActive()) {\n'
+              '\t\treturn false;\n'
+              '\t}\n'
+              '\tconst auto key = e->key();\n'
+              '\tconst auto isDown = (key == Qt::Key_Down);\n'
+              '\tconst auto isUp = (key == Qt::Key_Up);\n'
+              '\tconst auto isPageDown = (key == Qt::Key_PageDown);\n'
+              '\tconst auto isPageUp = (key == Qt::Key_PageUp);\n'
+              '\tconst auto isHome = (key == Qt::Key_Home);\n'
+              '\tconst auto isEnd = (key == Qt::Key_End);\n'
+              '\tif (!isDown && !isUp && !isPageDown && !isPageUp\n'
+              '\t\t\t&& !isHome && !isEnd) {\n'
+              '\t\treturn false;\n'
+              '\t}\n'
+              '\tif (e->modifiers()\n'
+              '\t\t& (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) {\n'
+              '\t\treturn false;\n'
+              '\t}\n'
+              '\ta11yRecomputeVisible();\n'
+              '\tconst int total = int(_a11yVisibleItems.size());\n'
+              '\tif (total <= 0) return false;\n'
+              '\tconst int prev = _a11yCurrentIndex;\n'
+              '\tint next = prev;\n'
+              '\tif (isHome) next = 0;\n'
+              '\telse if (isEnd) next = total - 1;\n'
+              '\telse if (isDown) next = (prev < 0) ? 0 : std::min(prev + 1, total - 1);\n'
+              '\telse if (isUp) next = (prev < 0) ? (total - 1) : std::max(prev - 1, 0);\n'
+              '\telse if (isPageDown) next = (prev < 0) ? 0 : std::min(prev + 5, total - 1);\n'
+              '\telse if (isPageUp) next = (prev < 0) ? (total - 1) : std::max(prev - 5, 0);\n'
+              '\t_a11yCurrentIndex = next;\n'
+              '\tif (prev != next) {\n'
+              '\t\taccessibilityChildFocused(next);\n'
+              '\t}\n'
+              '\treturn true;\n'
+              '}\n'
+          )
+
+          cpp = cpp.rstrip() + '\n' + impl
+          with open(cpp_path, 'w', encoding='utf-8') as f:
+              f.write(cpp)
+          print('history_inner_widget.cpp patched (a11y key)')
+
+      # ============================================
+      # 7d. Patch VoiceRecordBar for screen-reader voice recording.
+      #     The voice button is fundamentally hold-to-record: it watches
+      #     MouseButtonPress / Release with a 250 ms timer. A synthesized
+      #     click (what lib_ui's accessibilityDoAction does for buttons)
+      #     never starts the capture. We expose a Q_INVOKABLE method on
+      #     VoiceRecordBar that drives the state machine directly, then
+      #     bind it to Ctrl+Shift+R in our keyboard event filter.
+      # ============================================
+      - name: Patch VoiceRecordBar for accessibility
+        shell: python
+        run: |
+          import os, re
+
+          h_path = ('tdesktop/Telegram/SourceFiles/history/view/controls/'
+                    'history_view_voice_record_bar.h')
+          cpp_path = ('tdesktop/Telegram/SourceFiles/history/view/controls/'
+                      'history_view_voice_record_bar.cpp')
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skipping VoiceRecordBar patch')
+                  exit(0)
+
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'accessibilityToggleRecord' in h:
+              print('voice_record_bar.h already patched')
+          else:
+              # Q_INVOKABLE needs its own Q_OBJECT in the class — the one in
+              # Ui::RpWidget covers only base meta data. Inject right after
+              # the opening brace of the class.
+              h, n = re.subn(
+                  r'(class\s+VoiceRecordBar\s+final\s*:\s*'
+                  r'public\s+Ui::RpWidget\s*\{)',
+                  lambda m: m.group(1) + '\n\tQ_OBJECT\n',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: VoiceRecordBar class header landmark not found')
+                  exit(1)
+
+              # Add the Q_INVOKABLE declaration after startRecordingAndLock.
+              decl = '\n\tQ_INVOKABLE void accessibilityToggleRecord();\n'
+              h, n = re.subn(
+                  r'(void\s+startRecordingAndLock\s*\([^)]*\)\s*;)',
+                  lambda m: m.group(1) + decl,
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: startRecordingAndLock landmark not found in h')
+                  exit(1)
+
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('voice_record_bar.h patched')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'accessibilityToggleRecord' in cpp:
+              print('voice_record_bar.cpp already patched')
+              exit(0)
+
+          # State machine maps Ctrl+Shift+R (handled in our keyboard filter)
+          # onto whatever the user would normally do by pressing, dragging
+          # and releasing the send button:
+          #   not recording  -> startRecordingAndLock(false): record & enter
+          #                     locked mode (hands-free)
+          #   recording      -> stop(true): finalize & send
+          #   listening to a freshly recorded preview
+          #                  -> requestToSendWithOptions({}): send it
+          impl = (
+              '\n'
+              '// === Accessibility: single hotkey to start/send a voice ===\n'
+              'void VoiceRecordBar::accessibilityToggleRecord() {\n'
+              '\tif (isListenState()) {\n'
+              '\t\trequestToSendWithOptions({});\n'
+              '\t} else if (isActive()) {\n'
+              '\t\tstop(true);\n'
+              '\t} else {\n'
+              '\t\tstartRecordingAndLock(false);\n'
+              '\t}\n'
+              '}\n'
+          )
+
+          # The whole file lives inside `namespace HistoryView::Controls { ... }`
+          # — appending past the closing brace puts the impl in the global
+          # namespace, where VoiceRecordBar isn't a name and none of its
+          # private methods resolve. Insert just before the namespace close.
+          cpp, n_impl = re.subn(
+              r'(\n}\s*//\s*namespace\s+HistoryView::Controls\s*\n?)\Z',
+              lambda m: '\n' + impl + m.group(1),
+              cpp,
+              count=1)
+          if n_impl == 0:
+              print('ERROR: namespace HistoryView::Controls close not found '
+                    'at end of file')
+              exit(1)
+
+          with open(cpp_path, 'w', encoding='utf-8') as f:
+              f.write(cpp)
+          print('voice_record_bar.cpp patched')
+
+      # ============================================
+      # 7e. Patch lib_ui RpWidget::accessibilityChildFocused so NVDA actually
+      #     announces the newly-focused list item.
+      #
+      #     Upstream fires a single `QAccessibleEvent(this, Focus)` with
+      #     setChild(index). Through Qt's Windows MSAA bridge this becomes
+      #     EVENT_OBJECT_FOCUS, but NVDA empirically only re-reads list-item
+      #     selection when it also sees EVENT_OBJECT_SELECTION /
+      #     EVENT_OBJECT_STATECHANGE on the child. Visible state in
+      #     Dialogs::InnerWidget correctly flips selected/focused/active,
+      #     but without those extra events NVDA never knows to query and
+      #     speak the child — which exactly matches the reported symptom:
+      #     "cursor moves through chats but NVDA stays silent, only the
+      #     screen-review cursor reads them".
+      # ============================================
+      - name: Patch lib_ui RpWidget for NVDA child-focus events
+        shell: python
+        run: |
+          import os, re
+
+          cpp = 'tdesktop/Telegram/lib_ui/ui/rp_widget.cpp'
+          if not os.path.exists(cpp):
+              print(f'WARNING: missing {cpp} — skipping rp_widget patch')
+              exit(0)
+
+          with open(cpp, 'r', encoding='utf-8') as f:
+              src = f.read()
+
+          if 'a11y-extra-events' in src:
+              print('rp_widget.cpp already patched')
+              exit(0)
+
+          # Match the original three-line body and replace with a richer
+          # event burst plus diagnostic logging so we can confirm it ran.
+          # Bails loud if upstream renames the function.
+          replacement = (
+              'void RpWidget::accessibilityChildFocused(int index) {\n'
+              '\t// a11y-extra-events: fire Focus + Selection + StateChange\n'
+              '\t// AND fire Focus directly on the child interface — the\n'
+              '\t// MSAA bridge in Qt has been observed to drop child-id\n'
+              '\t// focus events on lists where the parent keeps QWidget\n'
+              '\t// focus. Diagnostic line appended to <Desktop>/\n'
+              '\t// tg_simple_diag.txt so we can confirm the call really fires.\n'
+              '\t{\n'
+              '\t\tstatic QFile diag;\n'
+              '\t\tif (!diag.isOpen()) {\n'
+              '\t\t\tconst auto dir = QStandardPaths::writableLocation(\n'
+              '\t\t\t\tQStandardPaths::DesktopLocation);\n'
+              '\t\t\tif (!dir.isEmpty()) {\n'
+              '\t\t\t\tdiag.setFileName(\n'
+              '\t\t\t\t\tdir + QStringLiteral("/tg_simple_diag.txt"));\n'
+              '\t\t\t\tdiag.open(QIODevice::Append | QIODevice::Text);\n'
+              '\t\t\t}\n'
+              '\t\t}\n'
+              '\t\tif (diag.isOpen()) {\n'
+              '\t\t\tQTextStream(&diag)\n'
+              '\t\t\t\t<< "childFocused index=" << index\n'
+              '\t\t\t\t<< " on " << metaObject()->className()\n'
+              '\t\t\t\t<< " hasFocus=" << (hasFocus() ? 1 : 0)\n'
+              '\t\t\t\t<< Qt::endl;\n'
+              '\t\t\tdiag.flush();\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\n'
+              '\t// Track the previous focused child per host widget so that\n'
+              '\t// on every focus change we can fire an explicit\n'
+              '\t// "lost focus" state change on the OLD child interface.\n'
+              '\t// Without this, NVDA via MSAA reads only the very first\n'
+              '\t// focused child of a list and stays silent on every arrow\n'
+              '\t// thereafter: lib_ui caches Accessible::Item instances per\n'
+              '\t// index and the only signal MSAA gets is a Focus event on\n'
+              '\t// the new child — the old child\'s cached IAccessible keeps\n'
+              '\t// its focused bit set in NVDA\'s mirror, so NVDA sees "same\n'
+              '\t// list still focused on the same item" and drops the event.\n'
+              '\tstatic QHash<const QWidget*, int> lastFocusedChild;\n'
+              '\tconst int previousIndex = lastFocusedChild.value(this, -1);\n'
+              '\tlastFocusedChild.insert(this, index);\n'
+              '\n'
+              '\t// CRITICAL: drop the cached Accessible::Item for the\n'
+              '\t// previous AND new index. lib_ui caches one Item (one\n'
+              '\t// MSAA IAccessible cookie) per child index for the\n'
+              '\t// lifetime of the widget. NVDA dedupes consecutive\n'
+              '\t// "focus gained" events that resolve to the same\n'
+              '\t// IAccessible pointer, which is why arrow keys after\n'
+              '\t// the first one were silent even though our state +\n'
+              '\t// focusChild() were correct (NVDA+Shift+M did speak\n'
+              '\t// the new chat because it queried the focused object\n'
+              '\t// fresh). UniqueId\'s destructor calls\n'
+              '\t// QAccessible::deleteAccessibleInterface so move-\n'
+              '\t// assigning a default UniqueId both destroys the old\n'
+              '\t// Item and frees its MSAA cookie. Next call to\n'
+              '\t// accessibilityChildInterface(i) creates a brand-new\n'
+              '\t// Item with a fresh cookie — NVDA sees a genuinely\n'
+              '\t// different focused object and announces it.\n'
+              '\t{\n'
+              '\t\tauto &cacheList = accessibleItems().list;\n'
+              '\t\tconst int sz = int(cacheList.size());\n'
+              '\t\tif (index >= 0 && index < sz && cacheList[index]) {\n'
+              '\t\t\tcacheList[index] = Accessible::UniqueId();\n'
+              '\t\t}\n'
+              '\t\tif (previousIndex >= 0\n'
+              '\t\t\t\t&& previousIndex != index\n'
+              '\t\t\t\t&& previousIndex < sz\n'
+              '\t\t\t\t&& cacheList[previousIndex]) {\n'
+              '\t\t\tcacheList[previousIndex] = Accessible::UniqueId();\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\n'
+              '\tif (previousIndex >= 0 && previousIndex != index) {\n'
+              '\t\tauto lostState = QAccessible::State();\n'
+              '\t\tlostState.focused = true;\n'
+              '\t\tlostState.selected = true;\n'
+              '\t\tlostState.active = true;\n'
+              '\t\tQAccessibleStateChangeEvent lostOnParent(this, lostState);\n'
+              '\t\tlostOnParent.setChild(previousIndex);\n'
+              '\t\tQAccessible::updateAccessibility(&lostOnParent);\n'
+              '\t\tif (auto prev = accessibilityChildInterface(previousIndex)) {\n'
+              '\t\t\tQAccessibleStateChangeEvent lostOnChild(prev, lostState);\n'
+              '\t\t\tQAccessible::updateAccessibility(&lostOnChild);\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\n'
+              '\tQAccessibleEvent focus(this, QAccessible::Focus);\n'
+              '\tfocus.setChild(index);\n'
+              '\tQAccessible::updateAccessibility(&focus);\n'
+              '\n'
+              '\tQAccessibleEvent selection(this, QAccessible::Selection);\n'
+              '\tselection.setChild(index);\n'
+              '\tQAccessible::updateAccessibility(&selection);\n'
+              '\n'
+              '\tauto changedState = QAccessible::State();\n'
+              '\tchangedState.focused = true;\n'
+              '\tchangedState.selected = true;\n'
+              '\tchangedState.active = true;\n'
+              '\tQAccessibleStateChangeEvent stateChange(this, changedState);\n'
+              '\tstateChange.setChild(index);\n'
+              '\tQAccessible::updateAccessibility(&stateChange);\n'
+              '\n'
+              '\t// Fire Focus AND a focused/selected/active state change\n'
+              '\t// DIRECTLY on the new child interface. The state change on\n'
+              '\t// the child (not via parent.setChild) is what makes NVDA\n'
+              '\t// drop its cached IAccessible for the previously-focused\n'
+              '\t// child and pick up the new one.\n'
+              '\tif (auto child = accessibilityChildInterface(index)) {\n'
+              '\t\tQAccessibleEvent childFocus(child, QAccessible::Focus);\n'
+              '\t\tQAccessible::updateAccessibility(&childFocus);\n'
+              '\t\tQAccessibleStateChangeEvent childGained(child, changedState);\n'
+              '\t\tQAccessible::updateAccessibility(&childGained);\n'
+              '\t\tQAccessibleEvent childSelection(child, QAccessible::Selection);\n'
+              '\t\tQAccessible::updateAccessibility(&childSelection);\n'
+              '\t}\n'
+              '}'
+          )
+
+          pattern = (
+              r'void\s+RpWidget::accessibilityChildFocused\s*\(\s*int\s+index\s*\)'
+              r'\s*\{[^}]*\}'
+          )
+          src2, n = re.subn(pattern, replacement, src, count=1)
+          if n == 0:
+              print('ERROR: accessibilityChildFocused body not found '
+                    '(upstream lib_ui may have changed its shape)')
+              exit(1)
+
+          # The diagnostic block uses QFile/QStandardPaths/QTextStream; the
+          # file already includes <QtGui/...> which doesn't pull these in
+          # reliably across Qt versions. Inject explicit includes once.
+          inc_block = (
+              '#include <QtCore/QFile>\n'
+              '#include <QtCore/QHash>\n'
+              '#include <QtCore/QStandardPaths>\n'
+              '#include <QtCore/QTextStream>\n'
+          )
+          if '<QtCore/QFile>' not in src2:
+              src2, n_inc = re.subn(
+                  r'(#include\s+"ui/rp_widget\.h"\s*\n)',
+                  lambda m: m.group(1) + inc_block,
+                  src2,
+                  count=1)
+              if n_inc == 0:
+                  print('WARNING: own-header include not found; '
+                        'prepending diagnostic includes')
+                  src2 = inc_block + src2
+
+          with open(cpp, 'w', encoding='utf-8') as f:
+              f.write(src2)
+          print('lib_ui rp_widget.cpp patched (extra a11y events)')
+
+      # ============================================
+      # 7g. Make Dialogs::InnerWidget report focusable/focused state
+      #     UNCONDITIONALLY for chat rows.
+      #
+      # The chat list was silent under arrow navigation despite our
+      # patched accessibilityChildFocused firing Focus + Selection +
+      # StateChange + child-Focus on the right index, with the right
+      # childCount and the right focusChild.name. HistoryInner with
+      # the EXACT same machinery is announced fine in the same NVDA
+      # session.
+      #
+      # The root-cause difference (confirmed in upstream source):
+      #
+      #   HistoryInner::accessibilityChildState():
+      #     if (index == _accessibilityFocusedIndex) {
+      #         state.focusable = true;   // unconditional
+      #         state.focused = true;     // unconditional
+      #         state.active = true;
+      #     }
+      #
+      #   Dialogs::InnerWidget::accessibilityChildState():
+      #     if (Ui::ScreenReaderModeActive()) {
+      #         state.focusable = true;   // GATED!
+      #     }
+      #     if (it->get() == _selected) {
+      #         state.selected = true;
+      #         state.active = true;
+      #         if (Ui::ScreenReaderModeActive()) {
+      #             state.focused = true; // GATED!
+      #         }
+      #     }
+      #     // same pattern in the Filtered state
+      #
+      # NVDA's MSAA bridge needs the focusable and focused bits to be
+      # set when it queries the child after our Focus event fires. If
+      # ScreenReaderModeActive() returns false at query time (it can
+      # transiently flip during startup, or be evaluated on a thread
+      # where Qt's accessibility state lookup races our detection),
+      # one of those bits stays off, NVDA sees a selected-but-not-
+      # focusable/focused list child, and silently drops the event.
+      #
+      # Strip the ScreenReaderModeActive() guards so Dialogs::InnerWidget
+      # reports list-item focus the same way HistoryInner reports it.
+      # ============================================
+      - name: Patch Dialogs::InnerWidget for unconditional a11y focus state
+        shell: python
+        run: |
+          import os, re
+
+          cpp = 'tdesktop/Telegram/SourceFiles/dialogs/dialogs_inner_widget.cpp'
+          if not os.path.exists(cpp):
+              print(f'WARNING: missing {cpp} — skipping dialogs a11y patch')
+              exit(0)
+
+          with open(cpp, 'r', encoding='utf-8') as f:
+              src = f.read()
+
+          if ('a11y-unconditional-focusable' in src
+                  and 'a11y-unconditional-focused' in src
+                  and 'a11y-direct-nvda-chat-speech' in src):
+              print('dialogs_inner_widget.cpp already patched')
+              exit(0)
+
+          # The child item has to be focusable even if screen-reader mode
+          # is still racing to true; otherwise NVDA may discard the child
+          # focus event before it ever queries state.focused.
+          focusable_pattern = re.compile(
+              r'if\s*\(\s*Ui::ScreenReaderModeActive\s*\(\s*\)\s*\)\s*\{\s*'
+              r'state\.focusable\s*=\s*true\s*;\s*\}'
+          )
+          focusable_replacement = (
+              '/* a11y-unconditional-focusable: removed the\n'
+              '\t   ScreenReaderModeActive() guard so NVDA treats chat\n'
+              '\t   rows as focusable whenever it handles child focus */\\n'
+              '\tstate.focusable = true;'
+          )
+          src2, focusable_count = focusable_pattern.subn(
+              focusable_replacement,
+              src,
+              count=1)
+          if focusable_count == 0:
+              print('ERROR: ScreenReaderModeActive() / state.focusable '
+                    'guard not found — upstream Dialogs::InnerWidget '
+                    'may have changed shape')
+              exit(1)
+
+          # Match both occurrences:
+          #     if (Ui::ScreenReaderModeActive()) {
+          #         state.focused = true;
+          #     }
+          # Tolerate whitespace / Tab vs space differences.
+          pattern = re.compile(
+              r'if\s*\(\s*Ui::ScreenReaderModeActive\s*\(\s*\)\s*\)\s*\{\s*'
+              r'state\.focused\s*=\s*true\s*;\s*\}'
+          )
+          replacement = (
+              '/* a11y-unconditional-focused: removed the\n'
+              '\t\t\t   ScreenReaderModeActive() guard so NVDA reliably\n'
+              '\t\t\t   sees state.focused on the selected chat row */ '
+              'state.focused = true;'
+          )
+
+          src2, n = pattern.subn(replacement, src2)
+          if n == 0:
+              print('ERROR: ScreenReaderModeActive() / state.focused '
+                    'guard not found — upstream Dialogs::InnerWidget '
+                    'may have changed shape')
+              exit(1)
+          if 'telegram_simple_keyboard.h' not in src2:
+              src2, include_count = re.subn(
+                  r'(#include\s+"ui/screen_reader_mode\.h"\s*\n)',
+                  lambda m: m.group(1)
+                      + '#include "ui/accessibility/telegram_simple_keyboard.h"\n',
+                  src2,
+                  count=1)
+              if include_count == 0:
+                  print('ERROR: ui/screen_reader_mode.h include not found '
+                        '— cannot include NVDA speech helper')
+                  exit(1)
+
+          # The Qt/NVDA focus-child path can stay pinned to the first chat
+          # even while Telegram's own selection moves correctly. Announce from
+          # announceSelectedFocus(), where Dialogs::InnerWidget has just
+          # computed the real selected index, instead of querying it back
+          # from the accessibility tree after the fact.
+          direct_pattern = re.compile(
+              r'(accessibilityChildFocused\s*\(\s*index\s*\)\s*;)'
+          )
+          direct_replacement = (
+              r'\1'
+              '\n\t\t\t// a11y-direct-nvda-chat-speech: use the real'
+              '\n\t\t\t// Dialogs::InnerWidget selection index, not'
+              '\n\t\t\t// NVDA/Qt focusChild(), which may be stale.'
+              '\n\t\t\tconst auto a11yChatName ='
+              '\n\t\t\t\taccessibilityChildName(index).simplified();'
+              '\n\t\t\tif (!a11yChatName.isEmpty()) {'
+              '\n\t\t\t\tsetAccessibleName(a11yChatName);'
+              '\n\t\t\t\tQAccessibleEvent nameChanged('
+              '\n\t\t\t\t\tthis, QAccessible::NameChanged);'
+              '\n\t\t\t\tQAccessible::updateAccessibility(&nameChanged);'
+              '\n\t\t\t\tQAccessibleEvent parentFocus('
+              '\n\t\t\t\t\tthis, QAccessible::Focus);'
+              '\n\t\t\t\tQAccessible::updateAccessibility(&parentFocus);'
+              '\n\t\t\t\tTgSimpleA11y::LogLine(QStringLiteral('
+              '\n\t\t\t\t\t"[dialogs] direct announce immediate %1")'
+              '\n\t\t\t\t\t.arg(a11yChatName.left(40)));'
+              '\n\t\t\t\tstatic int a11ySpeechGeneration = 0;'
+              '\n\t\t\t\tconst int a11yThisSpeech = ++a11ySpeechGeneration;'
+              '\n\t\t\t\tQTimer::singleShot(180, this, ['
+              '\n\t\t\t\t\tthis, a11yChatName, a11yThisSpeech] {'
+              '\n\t\t\t\t\tif (a11yThisSpeech != a11ySpeechGeneration) {'
+              '\n\t\t\t\t\t\treturn;'
+              '\n\t\t\t\t\t}'
+              '\n\t\t\t\t\tsetAccessibleName(a11yChatName);'
+              '\n\t\t\t\t\tTgSimpleA11y::nvda::SpeakForced(a11yChatName);'
+              '\n\t\t\t\t\tQAccessibleEvent delayedNameChanged('
+              '\n\t\t\t\t\t\tthis, QAccessible::NameChanged);'
+              '\n\t\t\t\t\tQAccessible::updateAccessibility(&delayedNameChanged);'
+              '\n\t\t\t\t\tQAccessibleEvent delayedFocus('
+              '\n\t\t\t\t\t\tthis, QAccessible::Focus);'
+              '\n\t\t\t\t\tQAccessible::updateAccessibility(&delayedFocus);'
+              '\n\t\t\t\t\tTgSimpleA11y::LogLine(QStringLiteral('
+              '\n\t\t\t\t\t\t"[dialogs] direct announce delayed %1")'
+              '\n\t\t\t\t\t\t.arg(a11yChatName.left(40)));'
+              '\n\t\t\t\t});'
+              '\n\t\t\t}'
+          )
+          src2, direct_count = direct_pattern.subn(
+              direct_replacement,
+              src2)
+          if direct_count < 2:
+              print('ERROR: accessibilityChildFocused(index) call sites '
+                    'not found in announceSelectedFocus — upstream '
+                    'Dialogs::InnerWidget may have changed shape')
+              exit(1)
+          print('dialogs_inner_widget.cpp patched '
+                f'({focusable_count} focusable + {n} focused + '
+                f'{direct_count} direct speech site(s) updated)')
+
+          with open(cpp, 'w', encoding='utf-8') as f:
+              f.write(src2)
+
+      # ============================================
+      # 7f. Enter activates the focused message's main content.
+      #
+      # When a screen-reader user has navigated to a message with the
+      # arrow keys, pressing Enter should open whatever that message
+      # carries — a file, photo, video or link. Upstream HistoryInner
+      # has no Enter handler for this; the only keyboard action on a
+      # focused message is Space (play/pause media).
+      #
+      # Implementation: a11yActivateFocused() hit-tests the focused
+      # element along its vertical centre line via Element::textState,
+      # collects the first ClickHandler it finds (centre first so a
+      # media bubble resolves to its main content rather than the
+      # sender-name link at the top), and fires it through the same
+      # ActivateClickHandler path a real mouse click uses.
+      #
+      # This is "phase 1" — it reliably opens single-content messages.
+      # Multi-link messages still fall back to the Shift+F10 context
+      # menu; full Tab-through-every-clickable navigation is phase 2.
+      # ============================================
+      - name: Patch HistoryInner for Enter-to-activate
+        shell: python
+        run: |
+          import os, re
+
+          h_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.h'
+          cpp_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.cpp'
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skipping Enter-activate patch')
+                  exit(0)
+
+          # --- header: declare a11yActivateFocused() ---
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'a11yActivateFocused' in h:
+              changed_h = False
+              if 'a11yFocusedMessageSummary' not in h:
+                  h, n = re.subn(
+                      r'(void\s+a11yActivateFocused\s*\(\s*\)\s*;)',
+                      lambda m: m.group(1)
+                          + '\n\tbool a11yActivateFocusedLink();'
+                          + '\n\tvoid a11yMoveFocusedLink(int delta);'
+                          + '\n\tstd::vector<ClickHandlerPtr> a11yCollectFocusedLinks();'
+                          + '\n\tQString a11yFocusedLinkLabel(int index, int total) const;'
+                          + '\n\tQString a11yFocusedMessageSummary() const;'
+                          + '\n\tQString a11yMessageSummaryForView(not_null<Element*> view) const;',
+                      h,
+                      count=1)
+                  if n == 0:
+                      print('ERROR: a11yActivateFocused declaration landmark not found')
+                      exit(1)
+                  changed_h = True
+              elif 'a11yMessageSummaryForView' not in h:
+                  h, n = re.subn(
+                      r'(QString\s+a11yFocusedMessageSummary\s*\(\s*\)\s*const\s*;)',
+                      lambda m: m.group(1)
+                          + '\n\tQString a11yMessageSummaryForView(not_null<Element*> view) const;',
+                      h,
+                      count=1)
+                  if n == 0:
+                      print('ERROR: a11yFocusedMessageSummary declaration not found')
+                      exit(1)
+                  changed_h = True
+              if '_a11yFocusedLinkLabels' not in h:
+                  h, n = re.subn(
+                      r'(mutable std::vector<HistoryView::MessageSubItem>\s+_activeColumns\s*;)',
+                      lambda m: m.group(1)
+                          + '\n\tint _a11yFocusedLinkIndex = -1;'
+                          + '\n\tHistoryItem *_a11yFocusedLinksItem = nullptr;'
+                          + '\n\tstd::vector<ClickHandlerPtr> _a11yFocusedLinks;'
+                          + '\n\tstd::vector<QString> _a11yFocusedLinkLabels;',
+                      h,
+                      count=1)
+                  if n == 0:
+                      print('ERROR: _activeColumns landmark not found in .h')
+                      exit(1)
+                  changed_h = True
+              if changed_h:
+                  with open(h_path, 'w', encoding='utf-8') as f:
+                      f.write(h)
+                  print('history_inner_widget.h extended (link navigation)')
+              else:
+                  print('history_inner_widget.h already patched (Enter/link-activate)')
+          else:
+              # Inject right after the accessibilityChildSubItemValue
+              # declaration — keeps it inside the same accessibility block.
+              h, n = re.subn(
+                  r'(QString\s+accessibilityChildSubItemValue\s*\(\s*'
+                  r'int\s+row\s*,\s*int\s+column\s*\)\s*const\s+override\s*;)',
+                  lambda m: m.group(1)
+                      + '\n\tvoid a11yActivateFocused();'
+                      + '\n\tbool a11yActivateFocusedLink();'
+                      + '\n\tvoid a11yMoveFocusedLink(int delta);'
+                      + '\n\tstd::vector<ClickHandlerPtr> a11yCollectFocusedLinks();'
+                      + '\n\tQString a11yFocusedLinkLabel(int index, int total) const;'
+                      + '\n\tQString a11yFocusedMessageSummary() const;'
+                      + '\n\tQString a11yMessageSummaryForView(not_null<Element*> view) const;',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: accessibilityChildSubItemValue landmark '
+                        'not found in .h')
+                  exit(1)
+              h, n_fields = re.subn(
+                  r'(mutable std::vector<HistoryView::MessageSubItem>\s+_activeColumns\s*;)',
+                  lambda m: m.group(1)
+                      + '\n\tint _a11yFocusedLinkIndex = -1;'
+                      + '\n\tHistoryItem *_a11yFocusedLinksItem = nullptr;'
+                      + '\n\tstd::vector<ClickHandlerPtr> _a11yFocusedLinks;'
+                      + '\n\tstd::vector<QString> _a11yFocusedLinkLabels;',
+                  h,
+                  count=1)
+              if n_fields == 0:
+                  print('ERROR: _activeColumns landmark not found in .h')
+                  exit(1)
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('history_inner_widget.h patched (Enter/link-activate)')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'a11yCollectFocusedLinks' in cpp:
+              print('history_inner_widget.cpp already patched (Enter/link-activate)')
+              exit(0)
+
+          if 'telegram_simple_keyboard.h' not in cpp:
+              cpp, n_inc = re.subn(
+                  r'(#include\s+"history/history_inner_widget_accessibility\.h"\s*\n)',
+                  lambda m: m.group(1)
+                      + '#include "ui/accessibility/telegram_simple_keyboard.h"\n',
+                  cpp,
+                  count=1)
+              if n_inc == 0:
+                  print('ERROR: history_inner_widget_accessibility.h include not found')
+                  exit(1)
+
+          # Inject the Tab / Enter / Return handler just before the existing
+          # Space handler inside keyPressEvent's `if (count > 0)` block,
+          # so it sits in exactly the same screen-reader navigation
+          # context as Space.
+          key_inject = (
+              'if (e->key() == Qt::Key_Tab\n'
+              '\t\t\t&& !(e->modifiers() & ~Qt::ShiftModifier)) {\n'
+              '\t\t\ta11yMoveFocusedLink(\n'
+              '\t\t\t\t(e->modifiers() & Qt::ShiftModifier) ? -1 : 1);\n'
+              '\t\t\te->accept();\n'
+              '\t\t\treturn;\n'
+              '\t\t}\n'
+              '\t\tif ((e->key() == Qt::Key_Right\n'
+              '\t\t\t\t|| e->key() == Qt::Key_Left)\n'
+              '\t\t\t&& (e->modifiers() & Qt::ControlModifier)\n'
+              '\t\t\t&& !(e->modifiers() & ~(Qt::ControlModifier | Qt::ShiftModifier))) {\n'
+              '\t\t\ta11yMoveFocusedLink(\n'
+              '\t\t\t\t(e->key() == Qt::Key_Left) ? -1 : 1);\n'
+              '\t\t\te->accept();\n'
+              '\t\t\treturn;\n'
+              '\t\t}\n'
+              '\t\tif (e->key() == Qt::Key_Return\n'
+              '\t\t\t|| e->key() == Qt::Key_Enter) {\n'
+              '\t\t\ta11yActivateFocused();\n'
+              '\t\t\te->accept();\n'
+              '\t\t\treturn;\n'
+              '\t\t}\n'
+              '\n'
+              '\t\t'
+          )
+          cpp, n = re.subn(
+              r'(\bif \(e->key\(\) == Qt::Key_Space\) \{)',
+              lambda m: key_inject + m.group(1),
+              cpp,
+              count=1)
+          if n == 0:
+              print('ERROR: Key_Space handler landmark not found in .cpp')
+              exit(1)
+
+          cpp, n_tab_hook = re.subn(
+              r'(bool\s+HistoryInner::eventHook\s*\(\s*QEvent\s*\*\s*e\s*\)\s*\{\n)',
+              lambda m: m.group(1)
+                  + '\t// a11y-link-tab-eventhook: catch Tab before Qt focus traversal.\n'
+                  + '\tif (e->type() == QEvent::KeyPress) {\n'
+                  + '\t\tauto *key = static_cast<QKeyEvent*>(e);\n'
+                  + '\t\tif (key->key() == Qt::Key_Tab\n'
+                  + '\t\t\t\t&& !(key->modifiers() & ~Qt::ShiftModifier)\n'
+                  + '\t\t\t\t&& accessibilityChildCount() > 0) {\n'
+                  + '\t\t\ta11yMoveFocusedLink(\n'
+                  + '\t\t\t\t(key->modifiers() & Qt::ShiftModifier) ? -1 : 1);\n'
+                  + '\t\t\tkey->accept();\n'
+                  + '\t\t\treturn true;\n'
+                  + '\t\t}\n'
+                  + '\t}\n',
+              cpp,
+              count=1)
+          if n_tab_hook == 0:
+              print('ERROR: HistoryInner::eventHook landmark not found in .cpp')
+              exit(1)
+
+          # Append the implementation. Same translation unit as the
+          # ActivateClickHandler / textState / viewByItem / itemTop /
+          # mapPointToItem / prepareClickContext helpers it relies on,
+          # all already used by mouseActionFinish in this file.
+          impl = r'''
+          // === Enter/link a11y navigation (added by accessibility-patch) ===
+          std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {
+              _a11yFocusedLinks.clear();
+              _a11yFocusedLinkLabels.clear();
+              if (!_accessibilityFocusedItem) {
+                  _a11yFocusedLinkIndex = -1;
+                  _a11yFocusedLinksItem = nullptr;
+                  return _a11yFocusedLinks;
+              }
+              if (_a11yFocusedLinksItem != _accessibilityFocusedItem) {
+                  _a11yFocusedLinksItem = _accessibilityFocusedItem;
+                  _a11yFocusedLinkIndex = -1;
+              }
+              const auto view = viewByItem(_accessibilityFocusedItem);
+              if (!view) {
+                  _a11yFocusedLinkIndex = -1;
+                  return _a11yFocusedLinks;
+              }
+              const auto top = itemTop(view);
+              if (top < 0) {
+                  _a11yFocusedLinkIndex = -1;
+                  return _a11yFocusedLinks;
+              }
+              auto request = StateRequest();
+              const auto messageSummary = a11yFocusedMessageSummary();
+              const auto labelFromState = [&](const TextState &state) {
+                  QString detail = state.customTooltipText.simplified();
+                  const auto link = state.link;
+                  if (link) {
+                      if (detail.isEmpty()) detail = link->tooltip();
+                      if (detail.isEmpty()) detail = link->url();
+                      if (detail.isEmpty()) detail = link->copyToClipboardText();
+                      if (detail.isEmpty()) detail = link->dragText();
+                      if (detail.isEmpty()) detail = link->getTextEntity().data;
+                  }
+                  detail = detail.simplified();
+                  return detail.isEmpty() ? messageSummary : detail;
+              };
+              const auto add = [&](const TextState &state) {
+                  const auto link = state.link;
+                  if (!link) return;
+                  if (std::find(_a11yFocusedLinks.begin(),
+                          _a11yFocusedLinks.end(), link)
+                      != _a11yFocusedLinks.end()) {
+                      return;
+                  }
+                  _a11yFocusedLinks.push_back(link);
+                  _a11yFocusedLinkLabels.push_back(labelFromState(state));
+              };
+              const auto scan = [&](QPoint widgetPoint) {
+                  const auto itemPoint = mapPointToItem(widgetPoint, view);
+                  const auto state = view->textState(itemPoint, request);
+                  add(state);
+              };
+              const auto itemHeight = view->height();
+              const auto stepY = std::max(8, itemHeight / 12);
+              const auto stepX = std::max(16, width() / 8);
+              for (auto y = top + 4; y < top + itemHeight; y += stepY) {
+                  for (auto x = 4; x < width(); x += stepX) {
+                      scan(QPoint(x, y));
+                  }
+              }
+              for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {
+                  scan(QPoint(width() / 2, top + int(itemHeight * frac)));
+              }
+              if (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {
+                  _a11yFocusedLinkIndex = -1;
+              }
+              return _a11yFocusedLinks;
+          }
+
+          QString HistoryInner::a11yFocusedLinkLabel(int index, int total) const {
+              QString detail;
+              if (index >= 0 && index < int(_a11yFocusedLinkLabels.size())) {
+                  detail = _a11yFocusedLinkLabels[index].simplified();
+              }
+              if (detail.isEmpty()) {
+                  detail = a11yFocusedMessageSummary();
+              }
+              const auto link = (index >= 0 && index < int(_a11yFocusedLinks.size()))
+                  ? _a11yFocusedLinks[index]
+                  : ClickHandlerPtr();
+              const auto entity = link ? link->getTextEntity() : ClickHandler::TextEntity();
+              const auto isLink = link && (!link->url().isEmpty() || !entity.data.isEmpty());
+              auto result = QStringLiteral("%1 %2 из %3")
+                  .arg(isLink ? QStringLiteral("Ссылка") : QStringLiteral("Вложение"))
+                  .arg(index + 1)
+                  .arg(total);
+              if (!detail.isEmpty()) {
+                  result += QStringLiteral(": ") + detail.left(160);
+              }
+              return result;
+          }
+
+          QString HistoryInner::a11yMessageSummaryForView(
+                  not_null<Element*> view) const {
+              constexpr int kMaxSummaryChars = 160;
+              auto parts = QStringList();
+              if (const auto item = view->data()) {
+                  if (const auto from = item->from()) {
+                      const auto sender = from->name();
+                      if (!sender.isEmpty()) {
+                          parts.push_back(sender);
+                      }
+                  }
+              }
+              const auto active = HistoryView::ActiveMessageSubItems(view, _history);
+              for (const auto subItem : active) {
+                  if (subItem == HistoryView::MessageSubItem::Message) {
+                      continue;
+                  }
+                  auto value = HistoryView::MessageSubItemValue(
+                      view,
+                      _history,
+                      subItem).simplified();
+                  if (value.isEmpty()) {
+                      continue;
+                  }
+                  const auto label = HistoryView::MessageSubItemLabel(subItem).simplified();
+                  parts.push_back(label.isEmpty()
+                      ? value
+                      : (label + QStringLiteral(": ") + value));
+                  if (parts.size() >= 6) {
+                      break;
+                  }
+              }
+              if (parts.isEmpty()) {
+                  const auto message = HistoryView::MessageSubItemValue(
+                      view,
+                      _history,
+                      HistoryView::MessageSubItem::Message).simplified();
+                  if (!message.isEmpty()) {
+                      parts.push_back(message.left(120));
+                  }
+              }
+              auto result = parts.join(QStringLiteral(", "));
+              if (result.isEmpty()) {
+                  result = view->data()->notificationText().text.simplified();
+              }
+              return result.left(kMaxSummaryChars);
+          }
+
+          QString HistoryInner::a11yFocusedMessageSummary() const {
+              if (!_accessibilityFocusedItem) {
+                  return QString();
+              }
+              const auto view = viewByItem(_accessibilityFocusedItem);
+              if (!view) {
+                  return QString();
+              }
+              return a11yMessageSummaryForView(view);
+          }
+
+          void HistoryInner::a11yMoveFocusedLink(int delta) {
+              const auto links = a11yCollectFocusedLinks();
+              const auto total = int(links.size());
+              if (total <= 0) {
+                  TgSimpleA11y::nvda::SpeakForced(QStringLiteral("В сообщении нет ссылок или вложений"));
+                  TgSimpleA11y::LogLine(QStringLiteral("[messages] no links in focused message"));
+                  return;
+              }
+              if (_a11yFocusedLinkIndex < 0) {
+                  _a11yFocusedLinkIndex = (delta < 0) ? (total - 1) : 0;
+              } else {
+                  _a11yFocusedLinkIndex = (_a11yFocusedLinkIndex + delta + total) % total;
+              }
+              const auto label = a11yFocusedLinkLabel(_a11yFocusedLinkIndex, total);
+              TgSimpleA11y::nvda::SpeakForced(label);
+              if (_a11yFocusedLinkIndex >= 0
+                      && _a11yFocusedLinkIndex < int(_a11yFocusedLinks.size())) {
+                  const auto &link = _a11yFocusedLinks[_a11yFocusedLinkIndex];
+                  const auto entity = link ? link->getTextEntity() : ClickHandler::TextEntity();
+                  TgSimpleA11y::LogLine(QStringLiteral(
+                      "[messages] focused link %1 type=%2 url=%3 data=%4")
+                      .arg(label.left(80))
+                      .arg(int(entity.type))
+                      .arg(link ? link->url().left(80) : QString())
+                      .arg(entity.data.left(80)));
+              } else {
+                  TgSimpleA11y::LogLine(QStringLiteral("[messages] focused link %1").arg(label.left(80)));
+              }
+          }
+
+          bool HistoryInner::a11yActivateFocusedLink() {
+              const auto links = a11yCollectFocusedLinks();
+              if (_a11yFocusedLinkIndex < 0
+                      || _a11yFocusedLinkIndex >= int(links.size())) {
+                  return false;
+              }
+              const auto link = links[_a11yFocusedLinkIndex];
+              if (!link || !_accessibilityFocusedItem) {
+                  return false;
+              }
+              TgSimpleA11y::LogLine(QStringLiteral("[messages] activate focused link index=%1")
+                  .arg(_a11yFocusedLinkIndex));
+              ActivateClickHandler(
+                  window(),
+                  link,
+                  prepareClickContext(
+                      Qt::LeftButton,
+                      _accessibilityFocusedItem->fullId()));
+              return true;
+          }
+
+          void HistoryInner::a11yActivateFocused() {
+              if (!_accessibilityFocusedItem) {
+                  return;
+              }
+              const auto item = _accessibilityFocusedItem;
+              if (const auto media = item->media()) {
+                  if (const auto document = media->document()) {
+                      if (document->isVoiceMessage()
+                              || document->isSong()
+                              || document->isAudioFile()
+                              || document->isVideoMessage()) {
+                          TgSimpleA11y::LogLine(QStringLiteral("[messages] play focused media by Enter"));
+                          playPauseFocusedMedia();
+                          return;
+                      }
+                  }
+              }
+              const auto links = a11yCollectFocusedLinks();
+              if (!links.empty()) {
+                  if (_a11yFocusedLinkIndex < 0) {
+                      _a11yFocusedLinkIndex = 0;
+                  }
+                  if (a11yActivateFocusedLink()) {
+                      return;
+                  }
+              }
+              const auto view = viewByItem(_accessibilityFocusedItem);
+              if (!view) {
+                  return;
+              }
+              const auto top = itemTop(view);
+              if (top < 0) {
+                  return;
+              }
+              const auto h = view->height();
+              const auto x = width() / 2;
+              auto request = StateRequest();
+              ClickHandlerPtr link;
+              for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {
+                  const auto y = top + int(h * frac);
+                  const auto itemPoint = mapPointToItem(QPoint(x, y), view);
+                  const auto state = view->textState(itemPoint, request);
+                  if (state.link) {
+                      link = state.link;
+                      break;
+                  }
+              }
+              if (link) {
+                  ActivateClickHandler(
+                      window(),
+                      link,
+                      prepareClickContext(
+                          Qt::LeftButton,
+                          _accessibilityFocusedItem->fullId()));
+              }
+          }
+          '''
+          cpp = cpp.rstrip() + '\n' + impl
+          with open(cpp_path, 'w', encoding='utf-8') as f:
+              f.write(cpp)
+          print('history_inner_widget.cpp patched (Enter-activate)')
+
+      # ============================================
+      # 7h. Rich message labels for arrow-key navigation.
+      #     Step 7b may be skipped when upstream already ships
+      #     accessibilityChild*(); step 7f adds link navigation but
+      #     leaves accessibilityChildName on notificationText() unless
+      #     we patch it here. Idempotent: safe when 7b already injected
+      #     a11yMessageSummaryForView.
+      # ============================================
+      - name: Patch HistoryInner message summaries for NVDA
+        shell: python
+        run: |
+          import os, re
+
+          h_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.h'
+          cpp_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.cpp'
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skipping message summary patch')
+                  exit(0)
+
+          summary_fn = r'''
+          QString HistoryInner::a11yMessageSummaryForView(
+                  not_null<Element*> view) const {
+              constexpr int kMaxSummaryChars = 160;
+              auto parts = QStringList();
+              if (const auto item = view->data()) {
+                  if (const auto from = item->from()) {
+                      const auto sender = from->name();
+                      if (!sender.isEmpty()) {
+                          parts.push_back(sender);
+                      }
+                  }
+              }
+              const auto active = HistoryView::ActiveMessageSubItems(view, _history);
+              for (const auto subItem : active) {
+                  if (subItem == HistoryView::MessageSubItem::Message) {
+                      continue;
+                  }
+                  auto value = HistoryView::MessageSubItemValue(
+                      view,
+                      _history,
+                      subItem).simplified();
+                  if (value.isEmpty()) {
+                      continue;
+                  }
+                  const auto label = HistoryView::MessageSubItemLabel(subItem).simplified();
+                  parts.push_back(label.isEmpty()
+                      ? value
+                      : (label + QStringLiteral(": ") + value));
+                  if (parts.size() >= 6) {
+                      break;
+                  }
+              }
+              if (parts.isEmpty()) {
+                  const auto message = HistoryView::MessageSubItemValue(
+                      view,
+                      _history,
+                      HistoryView::MessageSubItem::Message).simplified();
+                  if (!message.isEmpty()) {
+                      parts.push_back(message.left(120));
+                  }
+              }
+              auto result = parts.join(QStringLiteral(", "));
+              if (result.isEmpty()) {
+                  result = view->data()->notificationText().text.simplified();
+              }
+              return result.left(kMaxSummaryChars);
+          }
+          '''
+
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'a11yMessageSummaryForView' not in h:
+              if 'a11yFocusedMessageSummary' in h:
+                  h, n = re.subn(
+                      r'(QString\s+a11yFocusedMessageSummary\s*\(\s*\)\s*const\s*;)',
+                      lambda m: m.group(1)
+                          + '\n\tQString a11yMessageSummaryForView(not_null<Element*> view) const;',
+                      h,
+                      count=1)
+              elif 'accessibilityChildName' in h:
+                  h, n = re.subn(
+                      r'(QString\s+accessibilityChildName\s*\(\s*int\s+index\s*\)\s*const\s+override\s*;)',
+                      lambda m: m.group(1)
+                          + '\n\tQString a11yMessageSummaryForView(not_null<Element*> view) const;',
+                      h,
+                      count=1)
+              else:
+                  n = 0
+              if n:
+                  with open(h_path, 'w', encoding='utf-8') as f:
+                      f.write(h)
+                  print('history_inner_widget.h: added a11yMessageSummaryForView declaration')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          changed = False
+
+          if 'a11yMessageSummaryForView' not in cpp:
+              cpp = cpp.rstrip() + '\n' + summary_fn
+              changed = True
+              print('history_inner_widget.cpp: appended a11yMessageSummaryForView')
+
+          old_child_name = (
+              'return view->data()->notificationText().text;')
+          new_child_name = 'return a11yMessageSummaryForView(view);'
+          if old_child_name in cpp:
+              cpp = cpp.replace(old_child_name, new_child_name)
+              changed = True
+              print('history_inner_widget.cpp: accessibilityChildName uses summary')
+
+          old_summary = re.compile(
+              r'QString HistoryInner::a11yFocusedMessageSummary\(\) const \{[^}]+\}[^}]*\}',
+              re.DOTALL)
+          if 'a11yFocusedMessageSummary' in cpp and 'a11yMessageSummaryForView(view)' not in cpp:
+              replacement = (
+                  'QString HistoryInner::a11yFocusedMessageSummary() const {\n'
+                  '\tif (!_accessibilityFocusedItem) {\n'
+                  '\t\treturn QString();\n'
+                  '\t}\n'
+                  '\tconst auto view = viewByItem(_accessibilityFocusedItem);\n'
+                  '\tif (!view) {\n'
+                  '\t\treturn QString();\n'
+                  '\t}\n'
+                  '\treturn a11yMessageSummaryForView(view);\n'
+                  '}\n'
+              )
+              cpp2, n = old_summary.subn(replacement, cpp, count=1)
+              if n:
+                  cpp = cpp2
+                  changed = True
+                  print('history_inner_widget.cpp: a11yFocusedMessageSummary delegates')
+
+          if changed:
+              with open(cpp_path, 'w', encoding='utf-8') as f:
+                  f.write(cpp)
+          else:
+              print('history_inner_widget message summary patch already applied')
+
+      - name: Apply extended accessibility upstream patches
+        shell: bash
+        run: python accessibility-patch/scripts/apply_upstream_patches.py
+
+      # ============================================
+      # 8. Cache third-party libraries
+      # ============================================
+      - name: Generate cache key
+        shell: bash
+        run: |
+          PREPARE_FILE="$REPO_NAME/Telegram/build/prepare/prepare.py"
+          if [ -f "$PREPARE_FILE" ]; then
+            echo "CACHE_KEY=$(sha256sum $PREPARE_FILE | awk '{ print $1 }')" >> $GITHUB_ENV
+          else
+            echo "CACHE_KEY=no-prepare-file" >> $GITHUB_ENV
+          fi
+
+      - name: Restore libraries cache
+        id: cache-libs
+        uses: actions/cache@v4
+        with:
+          # ThirdParty must be cached too: prepare.py installs the
+          # bundled Python interpreter there (ThirdParty/python/Scripts/
+          # python), and tdesktop/CMakeLists.txt hard-codes that path
+          # as Python3_EXECUTABLE on Windows. Caching only Libraries
+          # makes a cache hit skip prepare.py and then CMake fails to
+          # find Python.
+          path: |
+            Libraries
+            ThirdParty
+          # v2 prefix busts the old Libraries-only cache.
+          key: win-x64-libs-v2-${{ env.CACHE_KEY }}
+
+      # ============================================
+      # 9. Prepare libraries (if not cached)
+      # ============================================
+      - name: Prepare libraries
+        if: steps.cache-libs.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          cd %REPO_NAME%
+          python Telegram\build\prepare\prepare.py
+
+      # ============================================
+      # 9b. Free disk space on the runner.
+      #
+      # Telegram + Qt + all the bundled libraries produce ~25-30 GB of
+      # intermediate .obj / .pdb / .pch files. windows-latest images have
+      # ~14 GB free out of the box, so the link step eventually trips
+      #   error C1090: PDB API call failed, error code '12'
+      # which is MSVC's polite phrasing for "ran out of disk during PDB
+      # generation". (Reproduced in builds 69732383083 / 69732394719,
+      # both died at link time after ~3.5h of compile work.)
+      #
+      # Strip the pre-installed SDKs/toolchains we don't need to reclaim
+      # ~30 GB before the build. This is the standard fix and is what
+      # other Telegram-derived workflows do.
+      # ============================================
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          Write-Host "Before cleanup:"
+          Get-PSDrive C | Select-Object Used,Free | Format-List
+          $paths = @(
+            'C:\Android',
+            'C:\Program Files (x86)\Android',
+            'C:\Program Files\Android',
+            'C:\ghcup',
+            'C:\hostedtoolcache\windows\go',
+            'C:\hostedtoolcache\windows\Ruby',
+            'C:\hostedtoolcache\windows\PyPy',
+            'C:\hostedtoolcache\windows\Java_Temurin-Hotspot_jdk',
+            'C:\Program Files\Java',
+            'C:\Program Files\MongoDB',
+            'C:\Program Files\MySQL',
+            'C:\Program Files\PostgreSQL',
+            'C:\Program Files (x86)\Microsoft SQL Server',
+            'C:\Program Files\Microsoft SQL Server',
+            'C:\Program Files (x86)\WiX Toolset v3.14',
+            'C:\Program Files\dotnet',
+            'C:\Program Files (x86)\dotnet',
+            'C:\SeleniumWebDrivers',
+            'C:\tools\php',
+            'C:\Strawberry'
+          )
+          foreach ($p in $paths) {
+            if (Test-Path $p) {
+              Write-Host "Removing $p ..."
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $p
+            }
+          }
+          Write-Host "After cleanup:"
+          Get-PSDrive C | Select-Object Used,Free | Format-List
+
+      # ============================================
+      # 9c. Set up sccache — caches MSVC .obj files keyed on source +
+      # flags hash. Build-output cache survives across runs via GitHub
+      # Actions cache; subsequent builds with unchanged Telegram source
+      # become a near-no-op for compilation.
+      #
+      # Requires /Z7 (embedded debug info, no shared PDB) — handled in
+      # the Configure step below. With /Zi sccache cannot cache because
+      # multiple .obj files share a single PDB.
+      # ============================================
+      - name: Set up sccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          variant: sccache
+          max-size: 2G
+          key: tdesktop-msvc-${{ env.CACHE_KEY }}
+          restore-keys: |
+            tdesktop-msvc-
+
+      # ============================================
+      # 10. Configure
+      #
+      # Switched to Ninja Multi-Config generator. Three reasons all the
+      # previous attempts hit walls:
+      #   1. CMAKE_<LANG>_COMPILER_LAUNCHER (= sccache) is silently
+      #      ignored by CMake's Visual Studio generator — sccache stats
+      #      from f1f3183's build showed `Compile requests: 0`. Ninja
+      #      honors the launcher correctly so sccache actually caches.
+      #   2. No more mspdbsrv shared PDB on /Zi (we kept /Z7 anyway)
+      #      so there's no need for /FS or --parallel caps.
+      #   3. Ninja's dependency graph is finer-grained than MSBuild;
+      #      incremental rebuilds touch fewer TUs.
+      #
+      # run_cmake.py in cmake_helpers rejects the `x64` token when an
+      # explicit `-G` is passed ("x86/x64/arm switch is supported only
+      # with Visual Studio"). We drop the x64 arg — msvc-dev-cmd@v1
+      # already sourced vcvars64.bat so cl.exe / link.exe in PATH are
+      # the x64 toolchain.
+      #
+      # CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded + CMP0141 NEW
+      # asks CMake to emit /Z7 (debug info embedded in each .obj)
+      # instead of the default /Zi (shared vc140.pdb). With /Z7 plus
+      # Ninja's per-file build, sccache can cache .obj outputs.
+      # ============================================
+      - name: Configure
+        shell: cmd
+        run: |
+          cd %REPO_NAME%\Telegram
+          call configure.bat ^
+              -G "Ninja Multi-Config" ^
+              -D TDESKTOP_API_ID=${{ secrets.API_ID }} ^
+              -D TDESKTOP_API_HASH=${{ secrets.API_HASH }} ^
+              -D CMAKE_POLICY_DEFAULT_CMP0141=NEW ^
+              -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded ^
+              -D CMAKE_CXX_COMPILER_LAUNCHER=sccache ^
+              -D CMAKE_C_COMPILER_LAUNCHER=sccache
+
+      # ============================================
+      # 11. Build
+      #
+      # /Z7 keeps debug info inside each .obj — for the autogenerated
+      # qrc_*.cpp files (some run 80 000+ lines) cl.exe's per-process
+      # address space (4 GB) gets uncomfortably close to full. With 4
+      # parallel cl.exe instances on a 16 GB runner this overflowed in
+      # f1f3183's build (C1060 "compiler is out of heap space"). Cap
+      # parallelism at 2 so each cl.exe has ~8 GB headroom and the
+      # huge qrc TUs compile cleanly.
+      #
+      # On rebuilds with a warm sccache the cap barely matters — most
+      # TUs hit cache, only a handful actually compile.
+      # ============================================
+      - name: Build
+        shell: cmd
+        run: |
+          cd %REPO_NAME%
+          set _CL_=/Z7 %_CL_%
+          cmake --build out --config Release --target Telegram --parallel 2
+          if errorlevel 1 (
+            sccache --show-stats || rem ignore if sccache absent
+            exit /b 1
+          )
+          sccache --show-stats || rem ignore if sccache absent
+
+      # ============================================
+      # 12. Package
+      # ============================================
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p artifact
+
+          # Find Telegram.exe wherever it ended up
+          find $REPO_NAME/out -name "Telegram.exe" -exec cp {} artifact/ \;
+
+          # Copy runtime DLLs if any
+          find $REPO_NAME/out -name "*.dll" -exec cp {} artifact/ \; 2>/dev/null || true
+
+          # Version file
+          echo "${{ env.TDESKTOP_VERSION }}-accessible" > artifact/version.txt
+
+          # Check we have the exe
+          if [ ! -f artifact/Telegram.exe ]; then
+            echo "ERROR: Telegram.exe not found!"
+            find $REPO_NAME/out -type f -name "*.exe" | head -20
+            exit 1
+          fi
+
+          echo "Telegram.exe found, size: $(du -h artifact/Telegram.exe | cut -f1)"
+
+      # Bundle nvdaControllerClient64.dll alongside Telegram.exe. Without it
+      # the user log shows the recursive scan of C:\Program Files\NVDA failing
+      # to find the DLL — turns out many NVDA installs ship without the
+      # controller-client component. With the DLL placed next to our .exe,
+      # Windows finds it on LoadLibraryW("nvdaControllerClient64.dll") via
+      # the default search order (process's own directory comes first), so
+      # our existing nvda::Speak() implementation lights up automatically.
+      - name: Bundle nvdaControllerClient.dll
+        shell: bash
+        run: |
+          set -e
+          # NVDA ships the controllerClient ZIP from their own CDN (not from
+          # GitHub releases — those only contain the installer .exe). The
+          # directory index at https://download.nvaccess.org/releases/stable/
+          # lists `nvda_<VERSION>_controllerClient.zip` for the current
+          # stable release. We scrape that name so we don't have to bump a
+          # pinned URL on every NVDA release.
+          BASE='https://download.nvaccess.org/releases/stable'
+          ZIPNAME=$(curl -sL "$BASE/" \
+            | grep -oE 'nvda_[0-9.]+_controllerClient\.zip' \
+            | head -n 1)
+          if [ -z "$ZIPNAME" ]; then
+            echo "ERROR: couldn't find controllerClient zip in NVDA index"
+            exit 1
+          fi
+          echo "Downloading $BASE/$ZIPNAME"
+          curl -L --fail --silent --show-error -o cc.zip "$BASE/$ZIPNAME"
+          mkdir -p cc-extract
+          unzip -q cc.zip -d cc-extract
+          # Modern NVDA layout: arch-specific subfolders with the same DLL
+          # filename inside:
+          #   x86/nvdaControllerClient.dll
+          #   x64/nvdaControllerClient.dll
+          #   arm64/nvdaControllerClient.dll
+          #   arm64ec/nvdaControllerClient.dll
+          # The legacy "nvdaControllerClient64.dll" naming is gone — that's
+          # what broke the previous build (69917772958). Find the x64 one
+          # specifically. As a fallback also accept the legacy filename in
+          # case NVDA reverts.
+          DLL=$(find cc-extract/x64 -iname 'nvdaControllerClient*.dll' \
+                  2>/dev/null | head -n 1)
+          if [ -z "$DLL" ]; then
+            DLL=$(find cc-extract -ipath '*x64*nvdaControllerClient*.dll' \
+                    | head -n 1)
+          fi
+          if [ -z "$DLL" ]; then
+            echo "ERROR: x64 nvdaControllerClient DLL not found in archive"
+            find cc-extract -type f -name '*.dll' | head -20
+            exit 1
+          fi
+          # Copy with the modern name so the artifact matches the current
+          # NVDA convention. Our keyboard.h tries both modern and legacy
+          # filenames on LoadLibraryW.
+          cp "$DLL" artifact/nvdaControllerClient.dll
+          LIC=$(find cc-extract -iname 'license.txt' | head -n 1)
+          if [ -n "$LIC" ]; then
+            cp "$LIC" artifact/nvdaControllerClient-license.txt
+          fi
+          echo "Bundled $DLL -> artifact/nvdaControllerClient.dll"
+          echo "Size: $(du -h artifact/nvdaControllerClient.dll | cut -f1)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telegram-Simple-Accessible-Win64
+          path: artifact/
+          retention-days: 90
+
+      # ============================================
+      # 12b. Build a Windows installer alongside the portable .exe so users
+      #      can pick whichever they prefer in the Release. Uses Inno Setup
+      #      (ships with windows-latest runners via chocolatey).
+      # ============================================
+      - name: Install Inno Setup
+        shell: cmd
+        run: choco install -y --no-progress innosetup
+
+      - name: Build installer
+        shell: cmd
+        run: |
+          mkdir installer
+          echo [Setup] > setup.iss
+          echo AppName=Telegram Accessible Simple >> setup.iss
+          echo AppId={{8A0B3A11-54B6-4D53-9C74-4D0B5E54A11A} >> setup.iss
+          echo AppVersion=${{ env.TDESKTOP_VERSION }}-accessible >> setup.iss
+          echo AppPublisher=tdesktop-accessible-simple >> setup.iss
+          echo AppPublisherURL=https://github.com/Nikita34196/tdesktop-accessible-simple >> setup.iss
+          echo AppUpdatesURL=https://github.com/Nikita34196/tdesktop-accessible-simple/releases/latest >> setup.iss
+          echo DefaultDirName={autopf}\TelegramAccessible >> setup.iss
+          echo DefaultGroupName=Telegram Accessible >> setup.iss
+          echo OutputDir=installer >> setup.iss
+          echo OutputBaseFilename=Telegram-Accessible-Setup >> setup.iss
+          echo Compression=lzma2 >> setup.iss
+          echo SolidCompression=yes >> setup.iss
+          echo ArchitecturesInstallIn64BitMode=x64 >> setup.iss
+          echo ArchitecturesAllowed=x64 >> setup.iss
+          echo PrivilegesRequired=lowest >> setup.iss
+          echo PrivilegesRequiredOverridesAllowed=dialog >> setup.iss
+          echo UninstallDisplayName=Telegram Accessible Simple >> setup.iss
+          echo. >> setup.iss
+          echo [Files] >> setup.iss
+          echo Source: "artifact\Telegram.exe"; DestDir: "{app}"; Flags: ignoreversion >> setup.iss
+          echo Source: "artifact\nvdaControllerClient.dll"; DestDir: "{app}"; Flags: ignoreversion >> setup.iss
+          echo Source: "artifact\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist recursesubdirs >> setup.iss
+          echo. >> setup.iss
+          echo [Icons] >> setup.iss
+          echo Name: "{group}\Telegram Accessible"; Filename: "{app}\Telegram.exe" >> setup.iss
+          echo Name: "{group}\Uninstall Telegram Accessible"; Filename: "{uninstallexe}" >> setup.iss
+          echo Name: "{autodesktop}\Telegram Accessible"; Filename: "{app}\Telegram.exe"; Tasks: desktopicon >> setup.iss
+          echo. >> setup.iss
+          echo [Tasks] >> setup.iss
+          echo Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; GroupDescription: "Дополнительно:"; Flags: unchecked >> setup.iss
+          echo. >> setup.iss
+          echo [Run] >> setup.iss
+          echo Filename: "{app}\Telegram.exe"; Description: "Запустить Telegram Accessible"; Flags: nowait postinstall skipifsilent >> setup.iss
+          type setup.iss
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+          dir installer
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telegram-Accessible-Setup
+          path: installer/Telegram-Accessible-Setup.exe
+          retention-days: 90
+
+      - name: Verify release payload
+        shell: bash
+        run: |
+          set -e
+          for file in \
+            artifact/Telegram.exe \
+            artifact/nvdaControllerClient.dll \
+            installer/Telegram-Accessible-Setup.exe
+          do
+            if [ ! -s "$file" ]; then
+              echo "ERROR: required release file is missing or empty: $file"
+              exit 1
+            fi
+            echo "Release file ready: $file ($(du -h "$file" | cut -f1))"
+          done
+
+      # ============================================
+      # 13. Create Release (on tag push only)
+      # ============================================
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifact/Telegram.exe
+            artifact/nvdaControllerClient.dll
+            installer/Telegram-Accessible-Setup.exe
+          body: |
+            ## Telegram Accessible Simple ${{ github.ref_name }}
+
+            Сборка на основе Telegram Desktop ${{ env.TDESKTOP_VERSION }}
+            с поддержкой скринридеров (NVDA, JAWS, Narrator).
+
+            ### Что выбрать
+            - **`Telegram-Accessible-Setup.exe`** — установщик с ярлыками
+              в меню «Пуск» и (опционально) на рабочем столе. Рекомендуется.
+            - **`Telegram.exe` + `nvdaControllerClient.dll`** — портативный
+              вариант. Скачайте оба файла в одну папку и запустите .exe.
+
+            ### Горячие клавиши
+            - **F6 / Shift+F6** — переключение между панелями
+              (Чаты ↔ Сообщения ↔ Поле ввода)
+            - **Стрелки вверх/вниз** — навигация по списку чатов и
+              сообщениям (имя отправителя + текст/вложение)
+            - **Tab / Shift+Tab** — ссылки и вложения в выбранном сообщении
+            - **Enter** — открыть вложение или воспроизвести медиа
+            - **Ctrl+Shift+R** — записать / отправить голосовое сообщение
+            - **Ctrl+Shift+B** — клавиатура бота (стрелки, Enter)
+            - **Ctrl+Shift+T** — тест озвучки NVDA
+            - **Home / End** — первый / последний чат в списке
+            - **Escape** — вернуться в список чатов
+            - **Ctrl+Shift+F6** — диагностический дамп дерева виджетов
+              (для отчётов о проблемах)
+
+            > Собрано на базе tdesktop@${{ env.SHORT_SHA }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

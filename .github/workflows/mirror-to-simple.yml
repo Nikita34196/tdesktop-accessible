@@ -1,0 +1,32 @@
+# Sync export/tdesktop-accessible-simple → Nikita34196/tdesktop-accessible-simple (main)
+# Secret: SIMPLE_MIRROR_TOKEN — fine-grained PAT, Contents read/write on simple repo only.
+name: Mirror Simple to standalone repo
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - export/tdesktop-accessible-simple
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Simple export tree
+        uses: actions/checkout@v4
+        with:
+          ref: export/tdesktop-accessible-simple
+          fetch-depth: 0
+
+      - name: Push to tdesktop-accessible-simple
+        env:
+          TOKEN: ${{ secrets.SIMPLE_MIRROR_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "ERROR: Add repository secret SIMPLE_MIRROR_TOKEN"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add simple "https://x-access-token:${TOKEN}@github.com/Nikita34196/tdesktop-accessible-simple.git"
+          git push simple HEAD:main --force

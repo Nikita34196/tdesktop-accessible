@@ -59,14 +59,21 @@ def patch_bot_keyboard():
     with open(h, 'r', encoding='utf-8') as f:
         hdr = f.read()
     if 'accessibilityButtonCount' not in hdr:
-        if 'Q_OBJECT' not in hdr:
+        # Never inject Q_OBJECT after ClickHandlerHost — it makes the rest of
+        # BotKeyboard private and breaks history_widget.cpp (C2248).
+        hdr = re.sub(
+            r'(, public ClickHandlerHost \{\s*\npublic:)\s*\n\tQ_OBJECT\s*\n',
+            r'\1\n',
+            hdr,
+        )
+        if not re.search(r'class BotKeyboard[\s\S]*?\{\s*\n\s*Q_OBJECT\s*\n', hdr):
             hdr, n = re.subn(
-                r'(ClickHandlerHost\s*\{\s*\npublic:)',
-                lambda m: m.group(1) + '\n\tQ_OBJECT',
+                r'(class BotKeyboard(?:\s*\n\s*: [^\{]+)*\s*\{\s*\n)(public:)',
+                r'\1\tQ_OBJECT\n\n\2',
                 hdr,
                 count=1)
             if n == 0:
-                print('ERROR: BotKeyboard class header not found')
+                print('ERROR: BotKeyboard class opening not found for Q_OBJECT')
                 sys.exit(1)
         decl = (
             '\n\tQ_INVOKABLE int accessibilityButtonCount() const;\n'

@@ -14,32 +14,6 @@ namespace TgAccessibility {
 
 namespace detail {
 
-inline QString InvokeStringMethod(QObject *object, const char *method) {
-	if (!object) {
-		return {};
-	}
-	QString result;
-	const bool ok = QMetaObject::invokeMethod(
-		object,
-		method,
-		Qt::DirectConnection,
-		Q_RETURN_ARG(QString, result));
-	return ok ? result.simplified() : QString();
-}
-
-inline int InvokeIntMethod(QObject *object, const char *method) {
-	if (!object) {
-		return 0;
-	}
-	int result = 0;
-	const bool ok = QMetaObject::invokeMethod(
-		object,
-		method,
-		Qt::DirectConnection,
-		Q_RETURN_ARG(int, result));
-	return ok ? result : 0;
-}
-
 inline QWidget *FindTopBar(QWidget *root) {
 	return FindByType(root, "HistoryView::TopBarWidget");
 }

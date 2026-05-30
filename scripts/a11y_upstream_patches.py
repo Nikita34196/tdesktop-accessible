@@ -34,13 +34,19 @@ def patch_top_bar():
     with open(cpp, 'r', encoding='utf-8') as f:
         src = f.read()
     if 'TopBarWidget::a11ySendActionText' not in src:
-        src = src.rstrip() + (
-            '\n\nQString TopBarWidget::a11ySendActionText() const {\n'
+        impl = (
+            '\nQString TopBarWidget::a11ySendActionText() const {\n'
             '\treturn _sendAction ? _sendAction->actionText().simplified() : QString();\n'
-            '}\n')
+            '}\n\n'
+        )
+        marker = '} // namespace HistoryView'
+        if marker not in src:
+            print('ERROR: HistoryView namespace close not found in top_bar_widget.cpp')
+            sys.exit(1)
+        src = src.replace(marker, impl + marker, 1)
         with open(cpp, 'w', encoding='utf-8') as f:
             f.write(src)
-        print('top_bar_widget.cpp patched')
+        print('top_bar_widget.cpp patched (inside HistoryView namespace)')
 
 
 def patch_bot_keyboard():
@@ -160,7 +166,11 @@ bool BotKeyboard::accessibilityActivateButton(int index) {
 	return true;
 }
 '''
-    body = body.rstrip() + impl
+    marker = 'BotKeyboard::~BotKeyboard() = default;'
+    if marker not in body:
+        print('ERROR: BotKeyboard destructor not found in .cpp')
+        sys.exit(1)
+    body = body.replace(marker, impl.strip() + '\n\n' + marker, 1)
     with open(cpp, 'w', encoding='utf-8') as f:
         f.write(body)
     print('bot_keyboard.cpp patched')

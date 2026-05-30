@@ -396,36 +396,6 @@ inline void Speak(const QString &text) {
 // preview + direction + timestamp, easily >200 chars). Shorter
 // strings pass through; cap aggressively so we always stay under
 // whatever NVDA's internal limit turns out to be.
-inline QString &LastChatListPhrase() {
-    static QString last;
-    return last;
-}
-
-inline QString &LastMessagePhrase() {
-    static QString last;
-    return last;
-}
-
-// Chat list: compact label + skip immediate duplicate (NVDA + patch 7g).
-inline void SpeakChatList(const QString &raw) {
-    const auto phrase = detail::CompactChatListLabel(raw);
-    if (phrase.isEmpty() || phrase == LastChatListPhrase()) {
-        return;
-    }
-    LastChatListPhrase() = phrase;
-    SpeakForced(phrase);
-}
-
-// Messages: compact summary + skip duplicate on same row.
-inline void SpeakMessage(const QString &raw) {
-    const auto phrase = detail::CompactAccessibilityText(raw);
-    if (phrase.isEmpty() || phrase == LastMessagePhrase()) {
-        return;
-    }
-    LastMessagePhrase() = phrase;
-    SpeakForced(phrase);
-}
-
 inline void SpeakForced(const QString &text) {
     EnsureLoaded();
     if (text.isEmpty()) return;
@@ -462,6 +432,37 @@ inline void SpeakForced(const QString &text) {
                 : QString())
         .arg(rc)
         .arg(trimmed.left(40).replace(QChar('\n'), QChar(' '))));
+}
+
+
+inline QString &LastChatListPhrase() {
+    static QString last;
+    return last;
+}
+
+inline QString &LastMessagePhrase() {
+    static QString last;
+    return last;
+}
+
+// Chat list: compact label + skip immediate duplicate (NVDA + patch 7g).
+inline void SpeakChatList(const QString &raw) {
+    const auto phrase = detail::CompactChatListLabel(raw);
+    if (phrase.isEmpty() || phrase == LastChatListPhrase()) {
+        return;
+    }
+    LastChatListPhrase() = phrase;
+    SpeakForced(phrase);
+}
+
+// Messages: compact summary + skip duplicate on same row.
+inline void SpeakMessage(const QString &raw) {
+    const auto phrase = detail::CompactAccessibilityText(raw);
+    if (phrase.isEmpty() || phrase == LastMessagePhrase()) {
+        return;
+    }
+    LastMessagePhrase() = phrase;
+    SpeakForced(phrase);
 }
 
 // Startup self-test. Speaks one fixed phrase shortly after the DLL is

@@ -55,8 +55,8 @@ def patch_bot_keyboard():
     if 'accessibilityButtonCount' not in hdr:
         if 'Q_OBJECT' not in hdr:
             hdr, n = re.subn(
-                r'(,\s*public\s+ClickHandlerHost\s*\{)',
-                lambda m: m.group(1) + '\n\tQ_OBJECT\n',
+                r'(ClickHandlerHost\s*\{\s*\npublic:)',
+                lambda m: m.group(1) + '\n\tQ_OBJECT',
                 hdr,
                 count=1)
             if n == 0:
@@ -68,12 +68,12 @@ def patch_bot_keyboard():
             '\tQ_INVOKABLE bool accessibilityActivateButton(int index);\n'
         )
         hdr, n = re.subn(
-            r'(void\s+resizeToWidth\s*\([^)]*\)\s*;)',
-            lambda m: m.group(1) + decl,
+            r'(\s+~BotKeyboard\(\);\s*)',
+            lambda m: decl + m.group(1),
             hdr,
             count=1)
         if n == 0:
-            print('ERROR: BotKeyboard resizeToWidth not found')
+            print('ERROR: BotKeyboard destructor landmark not found')
             sys.exit(1)
         with open(h, 'w', encoding='utf-8') as f:
             f.write(hdr)

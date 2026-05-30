@@ -1128,7 +1128,7 @@ jobs:
               '\n\t\t\t\t\t\treturn;'
               '\n\t\t\t\t\t}'
               '\n\t\t\t\t\tsetAccessibleName(a11yChatName);'
-              '\n\t\t\t\t\tTgAccessibility::nvda::SpeakForced(a11yChatName);'
+              '\n\t\t\t\t\tTgAccessibility::nvda::SpeakChatList(a11yChatName);'
               '\n\t\t\t\t\tQAccessibleEvent delayedNameChanged('
               '\n\t\t\t\t\t\tthis, QAccessible::NameChanged);'
               '\n\t\t\t\t\tQAccessible::updateAccessibility(&delayedNameChanged);'
@@ -1567,6 +1567,8 @@ jobs:
 
           void HistoryInner::a11yActivateFocused() {
               if (!_accessibilityFocusedItem) {
+                  TgAccessibility::nvda::Speak(
+                      QStringLiteral("Сначала выберите сообщение стрелками"));
                   return;
               }
               const auto item = _accessibilityFocusedItem;
@@ -1613,6 +1615,10 @@ jobs:
                   }
               }
               if (link) {
+                  // a11y-open-attachment-speech
+                  TgAccessibility::nvda::Speak(
+                      QStringLiteral("Открытие файла или ссылки"));
+
                   ActivateClickHandler(
                       window(),
                       link,

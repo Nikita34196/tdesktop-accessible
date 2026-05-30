@@ -396,6 +396,36 @@ inline void Speak(const QString &text) {
 // preview + direction + timestamp, easily >200 chars). Shorter
 // strings pass through; cap aggressively so we always stay under
 // whatever NVDA's internal limit turns out to be.
+inline QString &LastChatListPhrase() {
+    static QString last;
+    return last;
+}
+
+inline QString &LastMessagePhrase() {
+    static QString last;
+    return last;
+}
+
+// Chat list: compact label + skip immediate duplicate (NVDA + patch 7g).
+inline void SpeakChatList(const QString &raw) {
+    const auto phrase = detail::CompactChatListLabel(raw);
+    if (phrase.isEmpty() || phrase == LastChatListPhrase()) {
+        return;
+    }
+    LastChatListPhrase() = phrase;
+    SpeakForced(phrase);
+}
+
+// Messages: compact summary + skip duplicate on same row.
+inline void SpeakMessage(const QString &raw) {
+    const auto phrase = detail::CompactAccessibilityText(raw);
+    if (phrase.isEmpty() || phrase == LastMessagePhrase()) {
+        return;
+    }
+    LastMessagePhrase() = phrase;
+    SpeakForced(phrase);
+}
+
 inline void SpeakForced(const QString &text) {
     EnsureLoaded();
     if (text.isEmpty()) return;
@@ -467,6 +497,8 @@ inline void SelfTest() {}
 inline void Speak(const QString &) {}
 
 inline void SpeakForced(const QString &) {}
+inline void SpeakChatList(const QString &) {}
+inline void SpeakMessage(const QString &) {}
 
 #endif // Q_OS_WIN
 
@@ -671,6 +703,10 @@ private:
         if (key == Qt::Key_Left || key == Qt::Key_Up) { moveBotButton(-1); return true; }
         if (key == Qt::Key_Home) { _botButtonIndex = 0; announceBotButton(kb); return true; }
         if (key == Qt::Key_End) { _botButtonIndex = qMax(0, botButtonCount(kb) - 1); announceBotButton(kb); return true; }
+        if (key == Qt::Key_Tab) {
+            moveBotButton((mods & Qt::ShiftModifier) ? -1 : 1);
+            return true;
+        }
         return false;
     }
 
@@ -707,6 +743,27 @@ protected:
             focusBotKeyboard();
             return true;
         }
+        if (key == Qt::Key_O
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *inner = detail::FindByType(root, "HistoryInner")) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        inner, "a11yActivateFocused",
+                        Qt::DirectConnection);
+                    nvda::Speak(ok
+                        ? QStringLiteral("Открытие вложения")
+                        : QStringLiteral("Не удалось открыть вложение"));
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+O -> HistoryInner.a11yActivateFocused"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+            nvda::Speak(QStringLiteral(
+                "Откройте чат и выберите сообщение со стрелками"));
+            return true;
+        }
         if (handleBotKeyboardKeys(ke)) {
             return true;
         }
@@ -728,6 +785,18 @@ protected:
             return true;
         }
         if (key == Qt::Key_Escape) {
+            if (_botKeyboardFocus && botKeyboardWidget()) {
+                _botKeyboardFocus.clear();
+                _botButtonIndex = -1;
+                if (QWidget *root = detail::FindMainWindow()) {
+                    if (QWidget *history = detail::FindByType(root, "HistoryWidget")) {
+                        if (QWidget *input = detail::FindByType(history, "Ui::InputField")) {
+                            focusAndAnnounce(input, QStringLiteral("Поле ввода"));
+                            return true;
+                        }
+                    }
+                }
+            }
             const auto panels = discoverPanels();
             for (const auto &p : panels) {
                 if (p.second == QLatin1String("Список чатов")) {
@@ -746,7 +815,7 @@ protected:
                         if (auto *child = detail::FocusedListChild(iface)) {
                             const auto raw = child->text(QAccessible::Name);
                             if (!detail::IsUselessListItemName(raw)) {
-                                nvda::SpeakForced(detail::CompactChatListLabel(raw));
+                                nvda::SpeakChatList(raw);
                             }
                         }
                     }
@@ -808,7 +877,7 @@ protected:
                                 // summaries need SpeakForced like the chat list.
                                 if (type == QLatin1String("HistoryInner")) {
                                     if (!detail::IsUselessListItemName(name)) {
-                                        nvda::SpeakForced(detail::CompactAccessibilityText(name));
+                                        nvda::SpeakMessage(name);
                                     }
                                 }
                             } else {
@@ -1009,7 +1078,7 @@ private:
                     .arg(name)
                     .arg(int(child->role())));
                 if (!detail::IsUselessListItemName(name)) {
-                    nvda::SpeakForced(detail::CompactChatListLabel(name));
+                    nvda::SpeakChatList(name);
                 }
             });
         } else if (detail::DynamicTypeName(w) == QLatin1String("BotKeyboard")) {
@@ -1017,7 +1086,9 @@ private:
             _botButtonIndex = 0;
             const int total = botButtonCount(w);
             if (total > 0) {
-                nvda::SpeakForced(QStringLiteral("Клавиатура бота, %1 кнопок").arg(total));
+                announceBotButton(w);
+            } else {
+                nvda::Speak(QStringLiteral("Клавиатура бота пуста"));
             }
         }
 

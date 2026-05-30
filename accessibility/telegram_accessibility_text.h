@@ -8,6 +8,43 @@
 
 namespace TgAccessibility::detail {
 
+// One short spoken line for file/photo/video rows from MessageAccessibilityName.
+inline QString ShortenAttachmentLine(const QString &line) {
+	const auto s = line.simplified();
+	if (s.isEmpty()) {
+		return s;
+	}
+	const auto colon = s.indexOf(QLatin1Char(':'));
+	if (colon > 0 && colon < s.size() - 1) {
+		const auto kind = s.left(colon).simplified();
+		const auto rest = s.mid(colon + 1).simplified();
+		if (!rest.isEmpty()) {
+			if (kind.contains(QStringLiteral("файл"), Qt::CaseInsensitive)
+				|| kind.contains(QStringLiteral("file"), Qt::CaseInsensitive)
+				|| kind.contains(QStringLiteral("документ"), Qt::CaseInsensitive)) {
+				return QStringLiteral("Файл ") + rest.left(72);
+			}
+			if (kind.contains(QStringLiteral("фото"), Qt::CaseInsensitive)
+				|| kind.contains(QStringLiteral("photo"), Qt::CaseInsensitive)) {
+				return QStringLiteral("Фото") + (rest.isEmpty()
+					? QString()
+					: QStringLiteral(", ") + rest.left(48));
+			}
+			if (kind.contains(QStringLiteral("видео"), Qt::CaseInsensitive)
+				|| kind.contains(QStringLiteral("video"), Qt::CaseInsensitive)) {
+				return QStringLiteral("Видео") + (rest.isEmpty()
+					? QString()
+					: QStringLiteral(", ") + rest.left(48));
+			}
+		}
+	}
+	if (s.size() > 90) {
+		return s.left(90) + QStringLiteral("…");
+	}
+	return s;
+}
+
+
 // Collapse MessageAccessibilityName() output (newline-separated) into one
 // spoken phrase: sender, media/file line, reactions, short text preview.
 inline QString CompactAccessibilityText(
@@ -41,9 +78,10 @@ inline QString CompactAccessibilityText(
 			"файл", "file", "фото", "photo", "видео", "video",
 			"аудио", "audio", "голос", "voice", "стикер", "sticker",
 			"документ", "document", "GIF", "вложение", "attachment",
-			"скач", "download", "МБ", "MB", "KB", "кб",
+			"скач", "download", "МБ", "MB", "KB", "кб", "pdf", "zip",
+			"rar", "exe", "doc", "xls", "ppt", "mp3", "mp4", "wav",
 		})) {
-			picked.push_back(line);
+			picked.push_back(ShortenAttachmentLine(line));
 			break;
 		}
 	}

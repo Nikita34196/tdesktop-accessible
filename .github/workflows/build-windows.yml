@@ -2135,7 +2135,7 @@ jobs:
       - name: Patch shared media list accessible names
         shell: python
         run: |
-          import os
+          import os, re
 
           cpp = ('tdesktop/Telegram/SourceFiles/info/media/'
                  'info_media_inner_widget.cpp')
@@ -2150,11 +2150,20 @@ jobs:
               print('info_media_inner_widget.cpp already patched')
               exit(0)
 
+          if '#include "lang/lang_keys.h"' not in src:
+              src2, n = re.subn(
+                  r'(#include\s+"info/media/info_media_inner_widget\.h"\s*\n)',
+                  lambda m: m.group(1) + '#include "lang/lang_keys.h"\n',
+                  src,
+                  count=1)
+              if n:
+                  src = src2
+
           needle = '\treturn result;\n}\n\nvoid InnerWidget::saveState'
           repl = (
               '\t// a11y-media-list-accessible-name: F6 + NVDA read tab title.\n'
               '\tresult->setAccessibleName(\n'
-              '\t\tSharedMediaTitle(_controller->section().mediaType())());\n'
+              '\t\tSharedMediaTitle(_controller->section().mediaType())(tr::now));\n'
               '\n\treturn result;\n}\n\nvoid InnerWidget::saveState')
           if needle not in src:
               print('ERROR: InnerWidget::setupList return landmark not found')
@@ -2316,10 +2325,6 @@ jobs:
               '\t\t\ttext = text.left(120) + QString::fromUtf8("…");\n'
               '\t\t}\n'
               '\t\tparts << text;\n'
-              '\t}\n'
-              '\tconst auto date = item->date();\n'
-              '\tif (date.isValid()) {\n'
-              '\t\tparts << QLocale().toString(date, QLocale::ShortFormat);\n'
               '\t}\n'
               '\treturn parts.join(QString::fromUtf8(", "));\n'
               '}\n'

@@ -121,7 +121,7 @@ def patch_top_bar():
             )
         impl = (
             "\n// === Accessibility: extended shortcuts ===\n"
-            + media_show_impl("accessibilityShowSharedMediaPhotos", "Photo")
+            + media_show_impl("accessibilityShowSharedMediaPhotos", "PhotoVideo")
             + textwrap.dedent("""
                 void TopBarWidget::accessibilityOpenChatSearch() {
                 \ttoggleSearch(true, anim::type::instant);

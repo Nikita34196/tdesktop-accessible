@@ -1,7 +1,7 @@
 // telegram_accessibility_keyboard.h
 // Keyboard navigation helper for Telegram Desktop accessibility.
 // Installs a global event filter that implements F6 / Shift+F6 / Ctrl+Tab
-// navigation between major UI panels (chats, messages, input, profile, files).
+// navigation between major UI panels (chats, messages, input, profile, media).
 //
 // IMPORTANT design note:
 // Telegram custom widgets do NOT use the Q_OBJECT macro (only the lib_ui
@@ -33,6 +33,7 @@
 #endif
 
 #include "ui/accessibility/telegram_accessibility.h"
+#include "ui/accessibility/telegram_accessibility_text.h"
 
 namespace TgAccessibility {
 
@@ -395,22 +396,15 @@ inline void Speak(const QString &text) {
 // preview + direction + timestamp, easily >200 chars). Shorter
 // strings pass through; cap aggressively so we always stay under
 // whatever NVDA's internal limit turns out to be.
-inline void SpeakForced(const QString &text) {
+inline void SpeakForced(const QString &text, int maxChars = 110) {
     EnsureLoaded();
     if (text.isEmpty()) return;
 
-    // The row names coming from lib_ui may contain newlines and wide
-    // whitespace between row fields. NVDA's controller client is more
-    // reliable with a compact one-line phrase.
     QString trimmed = text.simplified();
     if (trimmed.isEmpty()) return;
 
-    // Truncate but keep the meaningful prefix. NVDA reads the chat
-    // title first in the lib_ui-built string, so the first ~110
-    // chars are the most informative bit.
-    constexpr int kMaxChars = 110;
-    if (trimmed.size() > kMaxChars) {
-        trimmed = trimmed.left(kMaxChars) + QStringLiteral("…");
+    if (maxChars > 0 && trimmed.size() > maxChars) {
+        trimmed = trimmed.left(maxChars) + QStringLiteral("…");
     }
 
     long rc = SpeakOnce(trimmed);
@@ -431,6 +425,37 @@ inline void SpeakForced(const QString &text) {
                 : QString())
         .arg(rc)
         .arg(trimmed.left(40).replace(QChar('\n'), QChar(' '))));
+}
+
+
+inline QString &LastChatListPhrase() {
+    static QString last;
+    return last;
+}
+
+inline QString &LastMessagePhrase() {
+    static QString last;
+    return last;
+}
+
+// Chat list: compact label + skip immediate duplicate (NVDA + patch 7g).
+inline void SpeakChatList(const QString &raw) {
+    const auto phrase = detail::ChatListSpeechLabel(raw);
+    if (phrase.isEmpty() || phrase == LastChatListPhrase()) {
+        return;
+    }
+    LastChatListPhrase() = phrase;
+    SpeakForced(phrase, 0);
+}
+
+// Messages: compact summary + skip duplicate on same row.
+inline void SpeakMessage(const QString &raw) {
+    const auto phrase = detail::CompactAccessibilityText(raw);
+    if (phrase.isEmpty() || phrase == LastMessagePhrase()) {
+        return;
+    }
+    LastMessagePhrase() = phrase;
+    SpeakForced(phrase);
 }
 
 // Startup self-test. Speaks one fixed phrase shortly after the DLL is
@@ -466,6 +491,8 @@ inline void SelfTest() {}
 inline void Speak(const QString &) {}
 
 inline void SpeakForced(const QString &) {}
+inline void SpeakChatList(const QString &) {}
+inline void SpeakMessage(const QString &) {}
 
 #endif // Q_OS_WIN
 
@@ -571,12 +598,52 @@ inline QAccessibleInterface *FocusedOrFirstListChild(
     return (iface && iface->childCount() > 0) ? iface->child(0) : nullptr;
 }
 
+inline QString InvokeStringMethod(QObject *object, const char *method) {
+	if (!object) return {};
+	QString result;
+	const bool ok = QMetaObject::invokeMethod(
+		object, method, Qt::DirectConnection, Q_RETURN_ARG(QString, result));
+	return ok ? result.simplified() : QString();
+}
+
+inline int InvokeIntMethod(QObject *object, const char *method) {
+	if (!object) return 0;
+	int result = 0;
+	const bool ok = QMetaObject::invokeMethod(
+		object, method, Qt::DirectConnection, Q_RETURN_ARG(int, result));
+	return ok ? result : 0;
+}
+
 // Names that carry no user-visible meaning — skip NVDA controller speech.
 inline bool IsUselessListItemName(const QString &name) {
     return name.isEmpty()
         || name == QLatin1String("Ui::RpWidget")
         || name == QLatin1String("Ui:RpWidget")
         || name == QLatin1String("RpWidget");
+}
+
+
+inline bool IsChatListPanel(QWidget *w) {
+    return w && DynamicTypeName(w) == QLatin1String("Dialogs::InnerWidget");
+}
+
+inline bool IsMessageListPanel(QWidget *w) {
+    return w && DynamicTypeName(w) == QLatin1String("HistoryInner");
+}
+
+inline bool IsSharedMediaListPanel(QWidget *w) {
+    return w && DynamicTypeName(w) == QLatin1String("Info::Media::ListWidget");
+}
+
+inline QWidget *FindTopBar(QWidget *root) {
+    if (!root) return nullptr;
+    if (QWidget *history = FindByType(root, "HistoryWidget")) {
+        if (QWidget *topBar = FindByType(
+                history, "HistoryView::TopBarWidget")) {
+            return topBar;
+        }
+    }
+    return FindByType(root, "HistoryView::TopBarWidget");
 }
 
 } // namespace detail
@@ -587,6 +654,87 @@ class KeyboardNavigationFilter : public QObject {
 public:
     explicit KeyboardNavigationFilter(QObject *parent = nullptr)
         : QObject(parent) {}
+
+private:
+    int _botButtonIndex = -1;
+    QPointer<QWidget> _botKeyboardFocus;
+
+    QWidget *botKeyboardWidget() const {
+        if (QWidget *root = detail::FindMainWindow()) {
+            return detail::FindByType(root, "BotKeyboard");
+        }
+        return nullptr;
+    }
+    int botButtonCount(QWidget *kb) const {
+        return detail::InvokeIntMethod(kb, "accessibilityButtonCount");
+    }
+    QString botButtonLabel(QWidget *kb, int index) const {
+        if (!kb) return {};
+        QString label;
+        QMetaObject::invokeMethod(kb, "accessibilityButtonLabel",
+            Qt::DirectConnection, Q_RETURN_ARG(QString, label), Q_ARG(int, index));
+        return label.simplified();
+    }
+    bool botActivateButton(QWidget *kb, int index) const {
+        if (!kb) return false;
+        bool ok = false;
+        QMetaObject::invokeMethod(kb, "accessibilityActivateButton",
+            Qt::DirectConnection, Q_RETURN_ARG(bool, ok), Q_ARG(int, index));
+        return ok;
+    }
+    void announceBotButton(QWidget *kb) {
+        const int total = botButtonCount(kb);
+        if (total <= 0) { nvda::Speak(QStringLiteral("Клавиатура бота пуста")); return; }
+        if (_botButtonIndex < 0 || _botButtonIndex >= total) _botButtonIndex = 0;
+        const auto label = botButtonLabel(kb, _botButtonIndex);
+        nvda::SpeakForced(QStringLiteral("Кнопка %1 из %2: %3")
+            .arg(_botButtonIndex + 1).arg(total)
+            .arg(label.isEmpty() ? QStringLiteral("без названия") : label));
+    }
+    void focusBotKeyboard() {
+        QWidget *kb = botKeyboardWidget();
+        if (!kb || !kb->isVisible()) {
+            nvda::Speak(QStringLiteral("Клавиатура бота не открыта")); return;
+        }
+        _botKeyboardFocus = kb;
+        if (kb->focusPolicy() == Qt::NoFocus) kb->setFocusPolicy(Qt::StrongFocus);
+        kb->setFocus(Qt::ShortcutFocusReason);
+        if (_botButtonIndex < 0) _botButtonIndex = 0;
+        announceBotButton(kb);
+    }
+    void moveBotButton(int delta) {
+        QWidget *kb = botKeyboardWidget();
+        if (!kb || !kb->isVisible()) return;
+        const int total = botButtonCount(kb);
+        if (total <= 0) return;
+        if (_botButtonIndex < 0) _botButtonIndex = 0;
+        else _botButtonIndex = (_botButtonIndex + delta + total) % total;
+        announceBotButton(kb);
+    }
+    bool handleBotKeyboardKeys(QKeyEvent *ke) {
+        QWidget *kb = botKeyboardWidget();
+        if (!kb || !kb->isVisible()) return false;
+        QWidget *focused = QApplication::focusWidget();
+        const bool onKb = (focused == kb) || (focused && kb->isAncestorOf(focused))
+            || (_botKeyboardFocus && _botKeyboardFocus.data() == kb);
+        if (!onKb) return false;
+        const int key = ke->key();
+        const auto mods = ke->modifiers();
+        if (mods & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) return false;
+        if (key == Qt::Key_Return || key == Qt::Key_Enter) {
+            if (botActivateButton(kb, _botButtonIndex)) nvda::Speak(QStringLiteral("Кнопка нажата"));
+            return true;
+        }
+        if (key == Qt::Key_Right || key == Qt::Key_Down) { moveBotButton(1); return true; }
+        if (key == Qt::Key_Left || key == Qt::Key_Up) { moveBotButton(-1); return true; }
+        if (key == Qt::Key_Home) { _botButtonIndex = 0; announceBotButton(kb); return true; }
+        if (key == Qt::Key_End) { _botButtonIndex = qMax(0, botButtonCount(kb) - 1); announceBotButton(kb); return true; }
+        if (key == Qt::Key_Tab) {
+            moveBotButton((mods & Qt::ShiftModifier) ? -1 : 1);
+            return true;
+        }
+        return false;
+    }
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override {
@@ -615,6 +763,36 @@ protected:
         const int key = ke->key();
         const auto mods = ke->modifiers();
 
+        if (key == Qt::Key_B
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            focusBotKeyboard();
+            return true;
+        }
+        if (key == Qt::Key_O
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *inner = detail::FindByType(root, "HistoryInner")) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        inner, "a11yActivateFocused",
+                        Qt::DirectConnection);
+                    nvda::Speak(ok
+                        ? QStringLiteral("Открытие вложения")
+                        : QStringLiteral("Не удалось открыть вложение"));
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+O -> HistoryInner.a11yActivateFocused"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+            nvda::Speak(QStringLiteral(
+                "Откройте чат и выберите сообщение со стрелками"));
+            return true;
+        }
+        if (handleBotKeyboardKeys(ke)) {
+            return true;
+        }
         // Ctrl+Shift+F6 — diagnostic: dump the widget tree now,
         // so we don't have to wait for the 10s scheduled dump.
         // Must be checked BEFORE the plain F6 case.
@@ -633,12 +811,41 @@ protected:
             return true;
         }
         if (key == Qt::Key_Escape) {
+            if (_botKeyboardFocus && botKeyboardWidget()) {
+                _botKeyboardFocus.clear();
+                _botButtonIndex = -1;
+                if (QWidget *root = detail::FindMainWindow()) {
+                    if (QWidget *history = detail::FindByType(root, "HistoryWidget")) {
+                        if (QWidget *input = detail::FindByType(history, "Ui::InputField")) {
+                            focusAndAnnounce(input, QStringLiteral("Поле ввода"));
+                            return true;
+                        }
+                    }
+                }
+            }
             const auto panels = discoverPanels();
             for (const auto &p : panels) {
                 if (p.second == QLatin1String("Список чатов")) {
                     focusAndAnnounce(p.first, p.second);
                     return true;
                 }
+            }
+        }
+        if ((key == Qt::Key_Home || key == Qt::Key_End) && !(mods & ~Qt::ShiftModifier)) {
+            QWidget *focused = QApplication::focusWidget();
+            if (focused && detail::DynamicTypeName(focused) == QLatin1String("Dialogs::InnerWidget")) {
+                QPointer<QWidget> alive(focused);
+                QTimer::singleShot(0, [alive] {
+                    if (!alive) return;
+                    if (auto *iface = QAccessible::queryAccessibleInterface(alive.data())) {
+                        if (auto *child = detail::FocusedListChild(iface)) {
+                            const auto raw = child->text(QAccessible::Name);
+                            if (!detail::IsUselessListItemName(raw)) {
+                                nvda::SpeakChatList(raw);
+                            }
+                        }
+                    }
+                });
             }
         }
         // Diagnostic: log arrow keys when focus is on a list-like panel.
@@ -655,8 +862,9 @@ protected:
             QWidget *focused = QApplication::focusWidget();
             if (focused) {
                 const auto type = detail::DynamicTypeName(focused);
-                if (type == QLatin1String("Dialogs::InnerWidget")
-                    || type == QLatin1String("HistoryInner")) {
+                if (detail::IsChatListPanel(focused)
+                    || detail::IsMessageListPanel(focused)
+                    || detail::IsSharedMediaListPanel(focused)) {
                     // Let the keypress run normally first, then read state.
                     QPointer<QWidget> alive(focused);
                     const QString keyName = (key == Qt::Key_Up) ? "Up"
@@ -696,7 +904,7 @@ protected:
                                 // summaries need SpeakForced like the chat list.
                                 if (type == QLatin1String("HistoryInner")) {
                                     if (!detail::IsUselessListItemName(name)) {
-                                        nvda::SpeakForced(name);
+                                        nvda::SpeakMessage(name);
                                     }
                                 }
                             } else {
@@ -752,7 +960,52 @@ protected:
                     "Ctrl+Shift+R -> VoiceRecordBar not found in main window"));
             }
         }
-        return QObject::eventFilter(obj, event);
+        if (key == Qt::Key_I
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *topBar = detail::FindTopBar(root)) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        topBar, "accessibilityToggleInfo",
+                        Qt::DirectConnection);
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+I -> TopBar.accessibilityToggleInfo"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+        }
+        if (key == Qt::Key_F
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *topBar = detail::FindTopBar(root)) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        topBar, "accessibilityShowSharedMediaFiles",
+                        Qt::DirectConnection);
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+F -> TopBar.accessibilityShowSharedMediaFiles"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+        }
+        if (key == Qt::Key_U
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *topBar = detail::FindTopBar(root)) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        topBar, "accessibilityShowSharedMediaLinks",
+                        Qt::DirectConnection);
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+U -> TopBar.accessibilityShowSharedMediaLinks"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+        }
+                return QObject::eventFilter(obj, event);
     }
 
 private:
@@ -805,8 +1058,12 @@ private:
         if (auto *outer = detail::FindByType(root, "Dialogs::Widget")) {
             QWidget *focusTarget = detail::FindByType(
                 outer, "Dialogs::InnerWidget");
-            out.append({ focusTarget ? focusTarget : outer,
-                QStringLiteral("Список чатов") });
+            const auto panel = focusTarget ? focusTarget : outer;
+            const auto panelName = panel->accessibleName().simplified();
+            out.append({ panel,
+                panelName.isEmpty()
+                    ? QStringLiteral("Список чатов")
+                    : panelName });
         }
 
         // 2) Message history — focus the inner scrollable list.
@@ -818,7 +1075,14 @@ private:
                 QStringLiteral("Сообщения") });
         }
 
-        // 3) Message input — Ui::InputField INSIDE the HistoryWidget
+        // 3) Bot keyboard when visible.
+        if (QWidget *kb = detail::FindByType(root, "BotKeyboard")) {
+            if (kb->isVisible()) {
+                out.append({ kb, QStringLiteral("Клавиатура бота") });
+            }
+        }
+
+        // 4) Message input — Ui::InputField INSIDE the HistoryWidget
         // (there are other InputFields elsewhere, e.g. dialog search).
         if (history) {
             if (QWidget *input = detail::FindByType(
@@ -890,9 +1154,18 @@ private:
                     .arg(name)
                     .arg(int(child->role())));
                 if (!detail::IsUselessListItemName(name)) {
-                    nvda::SpeakForced(name);
+                    nvda::SpeakChatList(name);
                 }
             });
+        } else if (detail::DynamicTypeName(w) == QLatin1String("BotKeyboard")) {
+            _botKeyboardFocus = w;
+            _botButtonIndex = 0;
+            const int total = botButtonCount(w);
+            if (total > 0) {
+                announceBotButton(w);
+            } else {
+                nvda::Speak(QStringLiteral("Клавиатура бота пуста"));
+            }
         }
 
         const QString line = QStringLiteral(

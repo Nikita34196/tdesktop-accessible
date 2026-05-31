@@ -14,7 +14,9 @@
 #include <QObject>
 #include <QWidget>
 #include <QKeyEvent>
+#include <QContextMenuEvent>
 #include <QApplication>
+#include <QCoreApplication>
 #include <QAccessible>
 #include <QDebug>
 #include <QList>
@@ -629,6 +631,27 @@ inline bool IsUselessListItemName(const QString &name) {
         || name == QLatin1String("RpWidget");
 }
 
+
+inline QWidget *FindAncestorByTypeName(QWidget *widget, const QLatin1String &type) {
+    for (auto *w = widget; w; w = w->parentWidget()) {
+        if (DynamicTypeName(w) == type) {
+            return w;
+        }
+    }
+    return nullptr;
+}
+
+inline bool TryOpenDialogsChatContextMenu(QWidget *from) {
+    auto *inner = FindAncestorByTypeName(from, QLatin1String("Dialogs::InnerWidget"));
+    if (!inner) {
+        return false;
+    }
+    const auto global = inner->mapToGlobal(inner->rect().center());
+    const auto local = inner->mapFromGlobal(global);
+    QContextMenuEvent event(QContextMenuEvent::Keyboard, local, global);
+    return QCoreApplication::sendEvent(inner, &event);
+}
+
 } // namespace detail
 
 class KeyboardNavigationFilter : public QObject {
@@ -721,7 +744,8 @@ private:
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override {
-        if (event->type() != QEvent::KeyPress) {
+        const auto type = event->type();
+        if (type != QEvent::KeyPress && type != QEvent::ContextMenu) {
             return QObject::eventFilter(obj, event);
         }
 
@@ -742,9 +766,26 @@ protected:
             return QObject::eventFilter(obj, event);
         }
 
+        if (type == QEvent::ContextMenu) {
+            QWidget *focused = QApplication::focusWidget();
+            if (detail::TryOpenDialogsChatContextMenu(focused)) {
+                return true;
+            }
+            return QObject::eventFilter(obj, event);
+        }
+
         auto *ke = static_cast<QKeyEvent *>(event);
         const int key = ke->key();
         const auto mods = ke->modifiers();
+
+        if ((key == Qt::Key_F10 && (mods & Qt::ShiftModifier))
+            || key == Qt::Key_Menu) {
+            QWidget *focused = QApplication::focusWidget();
+            if (detail::TryOpenDialogsChatContextMenu(focused)) {
+                ke->accept();
+                return true;
+            }
+        }
 
         if (key == Qt::Key_B
             && (mods & Qt::ControlModifier)

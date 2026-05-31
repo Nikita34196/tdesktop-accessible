@@ -106,8 +106,6 @@ jobs:
               SourceFiles/ui/accessibility/telegram_accessibility.h
               SourceFiles/ui/accessibility/telegram_accessibility_names.h
               SourceFiles/ui/accessibility/telegram_accessibility_keyboard.h
-              SourceFiles/ui/accessibility/telegram_accessibility_text.h
-              SourceFiles/ui/accessibility/telegram_accessibility_live.h
           )
           # === End accessibility layer ===
           PATCH
@@ -1128,7 +1126,7 @@ jobs:
               '\n\t\t\t\t\t\treturn;'
               '\n\t\t\t\t\t}'
               '\n\t\t\t\t\tsetAccessibleName(a11yChatName);'
-              '\n\t\t\t\t\tTgAccessibility::nvda::SpeakChatList(a11yChatName);'
+              '\n\t\t\t\t\tTgAccessibility::nvda::SpeakForced(a11yChatName);'
               '\n\t\t\t\t\tQAccessibleEvent delayedNameChanged('
               '\n\t\t\t\t\t\tthis, QAccessible::NameChanged);'
               '\n\t\t\t\t\tQAccessible::updateAccessibility(&delayedNameChanged);'
@@ -1567,8 +1565,6 @@ jobs:
 
           void HistoryInner::a11yActivateFocused() {
               if (!_accessibilityFocusedItem) {
-                  TgAccessibility::nvda::Speak(
-                      QStringLiteral("Сначала выберите сообщение стрелками"));
                   return;
               }
               const auto item = _accessibilityFocusedItem;
@@ -1615,10 +1611,6 @@ jobs:
                   }
               }
               if (link) {
-                  // a11y-open-attachment-speech
-                  TgAccessibility::nvda::Speak(
-                      QStringLiteral("Открытие файла или ссылки"));
-
                   ActivateClickHandler(
                       window(),
                       link,
@@ -1775,9 +1767,221 @@ jobs:
           else:
               print('history_inner_widget message summary patch already applied')
 
-      - name: Apply extended accessibility upstream patches
-        shell: bash
-        run: python accessibility-patch/scripts/a11y_upstream_patches.py
+      # ============================================
+      # 7i. Forwarded-message channel links (Tab / Enter navigation).
+      #
+      # Forward headers ("Forwarded from …") sit in the top ~48px of a
+      # bubble. The coarse grid in a11yCollectFocusedLinks often misses
+      # the channel-name ClickHandler, so NVDA says "no links".
+      # ============================================
+      - name: Patch HistoryInner forward-header link scan
+        shell: python
+        run: |
+          import os, re
+
+          cpp_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.cpp'
+          if not os.path.exists(cpp_path):
+              print(f'WARNING: missing {cpp_path} — skipping forward-header scan')
+              exit(0)
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'a11y-forward-header-scan' in cpp:
+              print('forward-header link scan already patched')
+              exit(0)
+
+          if 'a11yCollectFocusedLinks' not in cpp:
+              print('WARNING: a11yCollectFocusedLinks missing — skip forward-header scan')
+              exit(0)
+
+          marker = (
+              'for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {\n'
+              '\t\t\t\tscan(QPoint(width() / 2, top + int(itemHeight * frac)));\n'
+              '\t\t\t}\n'
+              '\t\t\tif (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {'
+          )
+          insert = (
+              'for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {\n'
+              '\t\t\t\tscan(QPoint(width() / 2, top + int(itemHeight * frac)));\n'
+              '\t\t\t}\n'
+              '\t\t\t// a11y-forward-header-scan: dense top band for\n'
+              '\t\t\t// "Forwarded from …" channel / user name links.\n'
+              '\t\t\t{\n'
+              '\t\t\t\tconst auto headerBottom = top\n'
+              '\t\t\t\t\t+ std::min(itemHeight / 3, 72);\n'
+              '\t\t\t\tconst auto headerStepY = 4;\n'
+              '\t\t\t\tconst auto headerStepX = std::max(8, width() / 24);\n'
+              '\t\t\t\tfor (auto y = top + 2; y < headerBottom; y += headerStepY) {\n'
+              '\t\t\t\t\tfor (auto x = 8; x < width(); x += headerStepX) {\n'
+              '\t\t\t\t\t\tscan(QPoint(x, y));\n'
+              '\t\t\t\t\t}\n'
+              '\t\t\t\t}\n'
+              '\t\t\t\tfor (const auto frac : { 0.06, 0.1, 0.14, 0.18, 0.22 }) {\n'
+              '\t\t\t\t\tscan(QPoint(width() / 2, top + int(itemHeight * frac)));\n'
+              '\t\t\t\t}\n'
+              '\t\t\t}\n'
+              '\t\t\tif (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {'
+          )
+          if marker not in cpp:
+              print('ERROR: a11yCollectFocusedLinks scan landmark not found')
+              exit(1)
+
+          cpp = cpp.replace(marker, insert, 1)
+          with open(cpp_path, 'w', encoding='utf-8') as f:
+              f.write(cpp)
+          print('history_inner_widget.cpp: forward-header link scan added')
+
+      # ============================================
+      # 7j. Chat list context menu (Shift+F10 / Menu key).
+      #
+      # Upstream showPeerMenu() and contextMenuEvent() require _selected.
+      # NVDA can focus a list child via MSAA without updating _selected,
+      # so Shift+F10 becomes a no-op. Sync from QAccessible::focusChild()
+      # before opening the menu; also handle the keys in keyPressEvent.
+      # ============================================
+      - name: Patch Dialogs chat list context menu for keyboard
+        shell: python
+        run: |
+          import os, re
+
+          cpp = 'tdesktop/Telegram/SourceFiles/dialogs/dialogs_inner_widget.cpp'
+          h = 'tdesktop/Telegram/SourceFiles/dialogs/dialogs_inner_widget.h'
+          for p in (cpp, h):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skipping chat menu patch')
+                  exit(0)
+
+          with open(cpp, 'r', encoding='utf-8') as f:
+              src = f.read()
+
+          if 'a11y-sync-selected-for-context-menu' in src:
+              print('dialogs_inner_widget.cpp chat menu patch already applied')
+              exit(0)
+
+          if 'QAccessible' not in src:
+              src, n_inc = re.subn(
+                  r'(#include\s+"ui/screen_reader_mode\.h"\s*\n)',
+                  lambda m: m.group(1) + '#include <QAccessible>\n',
+                  src,
+                  count=1)
+              if n_inc == 0:
+                  src, n_inc = re.subn(
+                      r'(#include\s+"dialogs/dialogs_inner_widget\.h"\s*\n)',
+                      lambda m: m.group(1) + '#include <QAccessible>\n',
+                      src,
+                      count=1)
+                  if n_inc == 0:
+                      print('ERROR: cannot insert QAccessible include')
+                      exit(1)
+
+          sync_fn = r'''
+          // a11y-sync-selected-for-context-menu: map MSAA-focused row
+          // to Telegram's _selected before keyboard context menu opens.
+          bool InnerWidget::a11ySyncSelectedFromFocusChild() {
+          	if (_selected || _state != WidgetState::Default) {
+          		return (_selected != nullptr);
+          	}
+          	auto *iface = QAccessible::queryAccessibleInterface(this);
+          	if (!iface) {
+          		return false;
+          	}
+          	auto *child = iface->focusChild();
+          	if (!child) {
+          		return false;
+          	}
+          	const auto index = iface->indexOfChild(child);
+          	if (index < 0 || index >= accessibilityChildCount()) {
+          		return false;
+          	}
+          	if (!_shownList || index >= int(_shownList->size())) {
+          		return false;
+          	}
+          	_selected = (_shownList->cbegin() + index)->get();
+          	return (_selected != nullptr);
+          }
+
+          '''
+
+          show_pattern = re.compile(
+              r'void\s+InnerWidget::showPeerMenu\s*\(\s*\)\s*\{\s*\n'
+              r'\tif\s*\(\s*!_selected\s*\)\s*\{\s*\n'
+              r'\t\treturn;\s*\n'
+              r'\t\}')
+          show_replacement = (
+              'void InnerWidget::showPeerMenu() {\n'
+              '\ta11ySyncSelectedFromFocusChild();\n'
+              '\tif (!_selected) {\n'
+              '\t\treturn;\n'
+              '\t}'
+          )
+          src2, n_show = show_pattern.subn(show_replacement, src, count=1)
+          if n_show == 0:
+              print('ERROR: showPeerMenu() landmark not found')
+              exit(1)
+
+          ctx_pattern = re.compile(
+              r'(void\s+InnerWidget::contextMenuEvent\s*\(\s*QContextMenuEvent\s*\*e\s*\)\s*\{\s*\n'
+              r'\t_menu\s*=\s*nullptr;\s*\n'
+              r'\n'
+              r'\tconst\s+auto\s+fromMouse\s*=\s*e->reason\(\)\s*==\s*QContextMenuEvent::Mouse;\s*\n)'
+          ctx_replacement = (
+              r'\1'
+              '\n'
+              '\tif (!fromMouse) {\n'
+              '\t\ta11ySyncSelectedFromFocusChild();\n'
+              '\t}\n'
+          )
+          src2, n_ctx = ctx_pattern.subn(ctx_replacement, src2, count=1)
+          if n_ctx == 0:
+              print('ERROR: contextMenuEvent() landmark not found')
+              exit(1)
+
+          key_pattern = re.compile(
+              r'(void\s+InnerWidget::keyPressEvent\s*\(\s*QKeyEvent\s*\*e\s*\)\s*\{\s*\n'
+              r'\tif\s*\(\s*processKeyDispatch\s*\(\s*e\s*\)\s*\)\s*\{\s*\n'
+              r'\t\treturn;\s*\n'
+              r'\t\}\s+else\s+if\s*\(\s*e->key\(\)\s*==\s*Qt::Key_Return)'
+          key_replacement = (
+              'void InnerWidget::keyPressEvent(QKeyEvent *e) {\n'
+              '\tif (processKeyDispatch(e)) {\n'
+              '\t\treturn;\n'
+              '\t} else if ((e->key() == Qt::Key_F10\n'
+              '\t\t\t&& (e->modifiers() & Qt::ShiftModifier))\n'
+              '\t\t\t|| e->key() == Qt::Key_Menu) {\n'
+              '\t\ta11ySyncSelectedFromFocusChild();\n'
+              '\t\tshowPeerMenu();\n'
+              '\t\treturn;\n'
+              '\t} else if (e->key() == Qt::Key_Return'
+          )
+          src2, n_key = key_pattern.subn(key_replacement, src2, count=1)
+          if n_key == 0:
+              print('ERROR: keyPressEvent() landmark not found')
+              exit(1)
+
+          if 'a11ySyncSelectedFromFocusChild' not in src2:
+              src2 = src2.replace(
+                  'void InnerWidget::showPeerMenu() {',
+                  sync_fn + 'void InnerWidget::showPeerMenu() {',
+                  1)
+
+          with open(h, 'r', encoding='utf-8') as f:
+              hdr = f.read()
+          if 'a11ySyncSelectedFromFocusChild' not in hdr:
+              hdr, n_decl = re.subn(
+                  r'(void\s+showPeerMenu\s*\(\s*\)\s*;)',
+                  r'\1\n\tbool a11ySyncSelectedFromFocusChild();',
+                  hdr,
+                  count=1)
+              if n_decl == 0:
+                  print('ERROR: showPeerMenu declaration not found in .h')
+                  exit(1)
+              with open(h, 'w', encoding='utf-8') as f:
+                  f.write(hdr)
+
+          with open(cpp, 'w', encoding='utf-8') as f:
+              f.write(src2)
+          print('dialogs_inner_widget.cpp: chat list context menu patched')
 
       # ============================================
       # 8. Cache third-party libraries
@@ -2151,9 +2355,7 @@ jobs:
             - **Tab / Shift+Tab** — ссылки и вложения в выбранном сообщении
             - **Enter** — открыть вложение или воспроизвести медиа
             - **Ctrl+Shift+R** — записать / отправить голосовое сообщение
-            - **Ctrl+Shift+B** — клавиатура бота (стрелки, Enter)
             - **Ctrl+Shift+T** — тест озвучки NVDA
-            - **Home / End** — первый / последний чат в списке
             - **Escape** — вернуться в список чатов
             - **Ctrl+Shift+F6** — диагностический дамп дерева виджетов
               (для отчётов о проблемах)

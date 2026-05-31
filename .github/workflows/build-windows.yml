@@ -2579,7 +2579,7 @@ jobs:
       # ============================================
       - name: Apply extended accessibility upstream patches
         shell: bash
-        run: python scripts/workflow_patch_extended.py
+        run: python accessibility-patch/scripts/workflow_patch_extended.py
         env:
           REPO_NAME: tdesktop
 
@@ -2595,7 +2595,7 @@ jobs:
           else
             BASE_KEY=no-prepare-file
           fi
-          A11Y_HASH=$(sha256sum accessibility/* .github/workflows/build-windows.yml 2>/dev/null | sha256sum | awk '{ print $1 }')
+          A11Y_HASH=$(sha256sum accessibility-patch/accessibility/* accessibility-patch/.github/workflows/build-windows.yml 2>/dev/null | sha256sum | awk '{ print $1 }')
           echo "CACHE_KEY=${BASE_KEY}-a11y-${A11Y_HASH}" >> $GITHUB_ENV
 
       - name: Restore libraries cache
@@ -2878,7 +2878,7 @@ jobs:
           echo AppId={{8A0B3A11-54B6-4D53-9C74-4D0B5E54A11A} >> setup.iss
           echo AppVersion=${{ env.TDESKTOP_VERSION }}-accessible >> setup.iss
           echo VersionInfoVersion=${{ env.TDESKTOP_VERSION }} >> setup.iss
-          echo VersionInfoTextVersion=Telegram Accessible ${{ github.ref_name || 'dev' }} >> setup.iss
+          echo VersionInfoTextVersion=Telegram Accessible >> setup.iss
           echo AppPublisher=tdesktop-accessible >> setup.iss
           echo AppPublisherURL=https://github.com/Nikita34196/tdesktop-accessible >> setup.iss
           echo AppUpdatesURL=https://github.com/Nikita34196/tdesktop-accessible/releases/latest >> setup.iss

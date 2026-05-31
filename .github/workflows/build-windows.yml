@@ -1426,6 +1426,22 @@ jobs:
               for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {
                   scan(QPoint(width() / 2, top + int(itemHeight * frac)));
               }
+              // a11y-forward-header-scan: dense top band for
+              // "Forwarded from …" channel / user name links.
+              {
+                  const auto headerBottom = top
+                      + std::min(itemHeight / 3, 72);
+                  const auto headerStepY = 4;
+                  const auto headerStepX = std::max(8, width() / 24);
+                  for (auto y = top + 2; y < headerBottom; y += headerStepY) {
+                      for (auto x = 8; x < width(); x += headerStepX) {
+                          scan(QPoint(x, y));
+                      }
+                  }
+                  for (const auto frac : { 0.06, 0.1, 0.14, 0.18, 0.22 }) {
+                      scan(QPoint(width() / 2, top + int(itemHeight * frac)));
+                  }
+              }
               if (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {
                   _a11yFocusedLinkIndex = -1;
               }
@@ -1778,67 +1794,6 @@ jobs:
       - name: Apply extended accessibility upstream patches
         shell: bash
         run: python accessibility-patch/scripts/a11y_upstream_patches.py
-
-      # ============================================
-      # 7i. Forwarded-message channel links (Tab / Enter navigation).
-      # ============================================
-      - name: Patch HistoryInner forward-header link scan
-        shell: python
-        run: |
-          import os
-
-          cpp_path = 'tdesktop/Telegram/SourceFiles/history/history_inner_widget.cpp'
-          if not os.path.exists(cpp_path):
-              print(f'WARNING: missing {cpp_path} — skipping forward-header scan')
-              exit(0)
-
-          with open(cpp_path, 'r', encoding='utf-8') as f:
-              cpp = f.read()
-
-          if 'a11y-forward-header-scan' in cpp:
-              print('forward-header link scan already patched')
-              exit(0)
-
-          if 'a11yCollectFocusedLinks' not in cpp:
-              print('WARNING: a11yCollectFocusedLinks missing — skip forward-header scan')
-              exit(0)
-
-          marker = (
-              'for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {\n'
-              '\t\t\t\tscan(QPoint(width() / 2, top + int(itemHeight * frac)));\n'
-              '\t\t\t}\n'
-              '\t\t\tif (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {'
-          )
-          insert = (
-              'for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {\n'
-              '\t\t\t\tscan(QPoint(width() / 2, top + int(itemHeight * frac)));\n'
-              '\t\t\t}\n'
-              '\t\t\t// a11y-forward-header-scan: dense top band for\n'
-              '\t\t\t// "Forwarded from …" channel / user name links.\n'
-              '\t\t\t{\n'
-              '\t\t\t\tconst auto headerBottom = top\n'
-              '\t\t\t\t\t+ std::min(itemHeight / 3, 72);\n'
-              '\t\t\t\tconst auto headerStepY = 4;\n'
-              '\t\t\t\tconst auto headerStepX = std::max(8, width() / 24);\n'
-              '\t\t\t\tfor (auto y = top + 2; y < headerBottom; y += headerStepY) {\n'
-              '\t\t\t\t\tfor (auto x = 8; x < width(); x += headerStepX) {\n'
-              '\t\t\t\t\t\tscan(QPoint(x, y));\n'
-              '\t\t\t\t\t}\n'
-              '\t\t\t\t}\n'
-              '\t\t\t\tfor (const auto frac : { 0.06, 0.1, 0.14, 0.18, 0.22 }) {\n'
-              '\t\t\t\t\tscan(QPoint(width() / 2, top + int(itemHeight * frac)));\n'
-              '\t\t\t\t}\n'
-              '\t\t\t}\n'
-              '\t\t\tif (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {'
-          )
-          if marker not in cpp:
-              print('ERROR: a11yCollectFocusedLinks scan landmark not found')
-              exit(1)
-          cpp = cpp.replace(marker, insert, 1)
-          with open(cpp_path, 'w', encoding='utf-8') as f:
-              f.write(cpp)
-          print('history_inner_widget.cpp: forward-header link scan added')
-
 
       # ============================================
       # 7k. Forum topic list — full row labels + panel name.

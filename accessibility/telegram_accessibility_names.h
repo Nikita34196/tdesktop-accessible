@@ -77,6 +77,13 @@ inline void ApplyNames(QWidget *root) {
         // -- Calls --
         { "CallButton",       "CallButton",       nullptr, "Позвонить" },
         { "MuteButton",       "MuteButton",       nullptr, "Отключить звук" },
+        { "PinnedBar",        nullptr,            nullptr, "Закреплённые сообщения" },
+        { "GroupCallBar",     "GroupCallBar",   nullptr, "Групповой звонок" },
+        { "TabbedSelector",   "TabbedSelector", nullptr, "Стикеры и эмодзи" },
+        { "ComposeSearch",    "ComposeSearch",  nullptr, "Поиск в чате" },
+        { "SearchField",      "SearchField",    nullptr, "Поиск в чате" },
+        { "ListWidget",       "ListWidget",     nullptr, "Список медиа" },
+
     };
 
     const int rulesCount = sizeof(rules) / sizeof(rules[0]);

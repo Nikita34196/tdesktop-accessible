@@ -2575,6 +2575,15 @@ jobs:
               f.write(cpp)
           print('top_bar_widget.cpp: links shortcut added')
       # ============================================
+      # 7o. Photos, search, pinned, status, stickers, group calls.
+      # ============================================
+      - name: Apply extended accessibility upstream patches
+        shell: bash
+        run: python scripts/workflow_patch_extended.py
+        env:
+          REPO_NAME: tdesktop
+
+      # ============================================
       # 8. Cache third-party libraries
       # ============================================
       - name: Generate cache key
@@ -2582,10 +2591,12 @@ jobs:
         run: |
           PREPARE_FILE="$REPO_NAME/Telegram/build/prepare/prepare.py"
           if [ -f "$PREPARE_FILE" ]; then
-            echo "CACHE_KEY=$(sha256sum $PREPARE_FILE | awk '{ print $1 }')" >> $GITHUB_ENV
+            BASE_KEY=$(sha256sum $PREPARE_FILE | awk '{ print $1 }')
           else
-            echo "CACHE_KEY=no-prepare-file" >> $GITHUB_ENV
+            BASE_KEY=no-prepare-file
           fi
+          A11Y_HASH=$(sha256sum accessibility/* .github/workflows/build-windows.yml 2>/dev/null | sha256sum | awk '{ print $1 }')
+          echo "CACHE_KEY=${BASE_KEY}-a11y-${A11Y_HASH}" >> $GITHUB_ENV
 
       - name: Restore libraries cache
         id: cache-libs
@@ -2678,7 +2689,7 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           variant: sccache
-          max-size: 2G
+          max-size: 4G
           key: tdesktop-msvc-${{ env.CACHE_KEY }}
           restore-keys: |
             tdesktop-msvc-
@@ -2834,6 +2845,14 @@ jobs:
           echo "Bundled $DLL -> artifact/nvdaControllerClient.dll"
           echo "Size: $(du -h artifact/nvdaControllerClient.dll | cut -f1)"
 
+      - name: Write accessible version file
+        shell: bash
+        run: |
+          REF="${GITHUB_REF_NAME:-dev}"
+          echo "Telegram Desktop Accessible ${REF}" > artifact/version.txt
+          echo "tdesktop=${{ env.TDESKTOP_VERSION }}" >> artifact/version.txt
+          echo "updates=${{ github.server_url }}/${{ github.repository }}/releases/latest" >> artifact/version.txt
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -2858,6 +2877,8 @@ jobs:
           echo AppName=Telegram Desktop Accessible >> setup.iss
           echo AppId={{8A0B3A11-54B6-4D53-9C74-4D0B5E54A11A} >> setup.iss
           echo AppVersion=${{ env.TDESKTOP_VERSION }}-accessible >> setup.iss
+          echo VersionInfoVersion=${{ env.TDESKTOP_VERSION }} >> setup.iss
+          echo VersionInfoTextVersion=Telegram Accessible ${{ github.ref_name || 'dev' }} >> setup.iss
           echo AppPublisher=tdesktop-accessible >> setup.iss
           echo AppPublisherURL=https://github.com/Nikita34196/tdesktop-accessible >> setup.iss
           echo AppUpdatesURL=https://github.com/Nikita34196/tdesktop-accessible/releases/latest >> setup.iss

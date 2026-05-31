@@ -123,12 +123,8 @@ inline QString CompactAccessibilityText(
 	return result;
 }
 
-inline QString CompactChatListLabel(const QString &full, int maxChars = 100) {
-	auto line = full.simplified();
-	if (line.size() <= maxChars) {
-		return line;
-	}
-	return line.left(maxChars) + QStringLiteral("…");
+inline QString ChatListSpeechLabel(const QString &full) {
+	return full.simplified();
 }
 
 } // namespace TgAccessibility::detail

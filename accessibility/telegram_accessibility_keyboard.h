@@ -1,7 +1,7 @@
 // telegram_accessibility_keyboard.h
 // Keyboard navigation helper for Telegram Desktop accessibility.
 // Installs a global event filter that implements F6 / Shift+F6 / Ctrl+Tab
-// navigation between the major UI panels (Chats / Messages / Message input).
+// navigation between major UI panels (chats, messages, input, profile, media).
 //
 // IMPORTANT design note:
 // Telegram custom widgets do NOT use the Q_OBJECT macro (only the lib_ui
@@ -396,22 +396,15 @@ inline void Speak(const QString &text) {
 // preview + direction + timestamp, easily >200 chars). Shorter
 // strings pass through; cap aggressively so we always stay under
 // whatever NVDA's internal limit turns out to be.
-inline void SpeakForced(const QString &text) {
+inline void SpeakForced(const QString &text, int maxChars = 110) {
     EnsureLoaded();
     if (text.isEmpty()) return;
 
-    // The row names coming from lib_ui may contain newlines and wide
-    // whitespace between row fields. NVDA's controller client is more
-    // reliable with a compact one-line phrase.
     QString trimmed = text.simplified();
     if (trimmed.isEmpty()) return;
 
-    // Truncate but keep the meaningful prefix. NVDA reads the chat
-    // title first in the lib_ui-built string, so the first ~110
-    // chars are the most informative bit.
-    constexpr int kMaxChars = 110;
-    if (trimmed.size() > kMaxChars) {
-        trimmed = trimmed.left(kMaxChars) + QStringLiteral("…");
+    if (maxChars > 0 && trimmed.size() > maxChars) {
+        trimmed = trimmed.left(maxChars) + QStringLiteral("…");
     }
 
     long rc = SpeakOnce(trimmed);
@@ -447,12 +440,12 @@ inline QString &LastMessagePhrase() {
 
 // Chat list: compact label + skip immediate duplicate (NVDA + patch 7g).
 inline void SpeakChatList(const QString &raw) {
-    const auto phrase = detail::CompactChatListLabel(raw);
+    const auto phrase = detail::ChatListSpeechLabel(raw);
     if (phrase.isEmpty() || phrase == LastChatListPhrase()) {
         return;
     }
     LastChatListPhrase() = phrase;
-    SpeakForced(phrase);
+    SpeakForced(phrase, 0);
 }
 
 // Messages: compact summary + skip duplicate on same row.
@@ -627,6 +620,30 @@ inline bool IsUselessListItemName(const QString &name) {
         || name == QLatin1String("Ui::RpWidget")
         || name == QLatin1String("Ui:RpWidget")
         || name == QLatin1String("RpWidget");
+}
+
+
+inline bool IsChatListPanel(QWidget *w) {
+    return w && DynamicTypeName(w) == QLatin1String("Dialogs::InnerWidget");
+}
+
+inline bool IsMessageListPanel(QWidget *w) {
+    return w && DynamicTypeName(w) == QLatin1String("HistoryInner");
+}
+
+inline bool IsSharedMediaListPanel(QWidget *w) {
+    return w && DynamicTypeName(w) == QLatin1String("Info::Media::ListWidget");
+}
+
+inline QWidget *FindTopBar(QWidget *root) {
+    if (!root) return nullptr;
+    if (QWidget *history = FindByType(root, "HistoryWidget")) {
+        if (QWidget *topBar = FindByType(
+                history, "HistoryView::TopBarWidget")) {
+            return topBar;
+        }
+    }
+    return FindByType(root, "HistoryView::TopBarWidget");
 }
 
 } // namespace detail
@@ -808,7 +825,7 @@ protected:
             }
             const auto panels = discoverPanels();
             for (const auto &p : panels) {
-                if (p.second == QLatin1String("Список чатов")) {
+                if (detail::IsChatListPanel(p.first)) {
                     focusAndAnnounce(p.first, p.second);
                     return true;
                 }
@@ -845,8 +862,9 @@ protected:
             QWidget *focused = QApplication::focusWidget();
             if (focused) {
                 const auto type = detail::DynamicTypeName(focused);
-                if (type == QLatin1String("Dialogs::InnerWidget")
-                    || type == QLatin1String("HistoryInner")) {
+                if (detail::IsChatListPanel(focused)
+                    || detail::IsMessageListPanel(focused)
+                    || detail::IsSharedMediaListPanel(focused)) {
                     // Let the keypress run normally first, then read state.
                     QPointer<QWidget> alive(focused);
                     const QString keyName = (key == Qt::Key_Up) ? "Up"
@@ -942,7 +960,52 @@ protected:
                     "Ctrl+Shift+R -> VoiceRecordBar not found in main window"));
             }
         }
-        return QObject::eventFilter(obj, event);
+        if (key == Qt::Key_I
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *topBar = detail::FindTopBar(root)) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        topBar, "accessibilityToggleInfo",
+                        Qt::DirectConnection);
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+I -> TopBar.accessibilityToggleInfo"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+        }
+        if (key == Qt::Key_F
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *topBar = detail::FindTopBar(root)) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        topBar, "accessibilityShowSharedMediaFiles",
+                        Qt::DirectConnection);
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+F -> TopBar.accessibilityShowSharedMediaFiles"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+        }
+        if (key == Qt::Key_U
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *topBar = detail::FindTopBar(root)) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        topBar, "accessibilityShowSharedMediaLinks",
+                        Qt::DirectConnection);
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+U -> TopBar.accessibilityShowSharedMediaLinks"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+        }
+                return QObject::eventFilter(obj, event);
     }
 
 private:
@@ -995,8 +1058,12 @@ private:
         if (auto *outer = detail::FindByType(root, "Dialogs::Widget")) {
             QWidget *focusTarget = detail::FindByType(
                 outer, "Dialogs::InnerWidget");
-            out.append({ focusTarget ? focusTarget : outer,
-                QStringLiteral("Список чатов") });
+            const auto panel = focusTarget ? focusTarget : outer;
+            const auto panelName = panel->accessibleName().simplified();
+            out.append({ panel,
+                panelName.isEmpty()
+                    ? QStringLiteral("Список чатов")
+                    : panelName });
         }
 
         // 2) Message history — focus the inner scrollable list.

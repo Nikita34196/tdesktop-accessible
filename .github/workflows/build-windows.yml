@@ -1426,6 +1426,22 @@ jobs:
               for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {
                   scan(QPoint(width() / 2, top + int(itemHeight * frac)));
               }
+              // a11y-forward-header-scan: dense top band for
+              // "Forwarded from …" channel / user name links.
+              {
+                  const auto headerBottom = top
+                      + std::min(itemHeight / 3, 72);
+                  const auto headerStepY = 4;
+                  const auto headerStepX = std::max(8, width() / 24);
+                  for (auto y = top + 2; y < headerBottom; y += headerStepY) {
+                      for (auto x = 8; x < width(); x += headerStepX) {
+                          scan(QPoint(x, y));
+                      }
+                  }
+                  for (const auto frac : { 0.06, 0.1, 0.14, 0.18, 0.22 }) {
+                      scan(QPoint(width() / 2, top + int(itemHeight * frac)));
+                  }
+              }
               if (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {
                   _a11yFocusedLinkIndex = -1;
               }
@@ -1779,6 +1795,785 @@ jobs:
         shell: bash
         run: python accessibility-patch/scripts/a11y_upstream_patches.py
 
+      # ============================================
+      # 7k. Forum topic list — full row labels + panel name.
+      # ============================================
+      - name: Patch forum topic list accessibility
+        shell: python
+        run: |
+          import os
+
+          a11y_cpp = (
+              'tdesktop/Telegram/SourceFiles/dialogs/'
+              'dialogs_inner_widget_accessibility.cpp')
+          inner_cpp = (
+              'tdesktop/Telegram/SourceFiles/dialogs/'
+              'dialogs_inner_widget.cpp')
+
+          for path in (a11y_cpp, inner_cpp):
+              if not os.path.exists(path):
+                  print(f'WARNING: missing {path} — skip forum topic patch')
+                  exit(0)
+
+          with open(a11y_cpp, 'r', encoding='utf-8') as f:
+              src = f.read()
+
+          if 'a11y-forum-topic-full-row' not in src:
+              old_topic = (
+                  '\tif (const auto topic = row->topic()) {\n'
+                  '\t\tconst auto title = topic->isGeneral()\n'
+                  '\t\t\t? Data::ForumGeneralIconTitle()\n'
+                  '\t\t\t: topic->title();\n'
+                  '\t\treturn tr::lng_sr_chat_topic(tr::now) + u" "_q + title;\n'
+                  '\t}\n')
+              new_topic = (
+                  '\tif (const auto topic = row->topic()) {\n'
+                  '\t\t// a11y-forum-topic-full-row: same richness as chats.\n'
+                  '\t\tQStringList parts;\n'
+                  '\t\tparts << tr::lng_sr_chat_topic(tr::now);\n'
+                  '\t\tparts << (topic->isGeneral()\n'
+                  '\t\t\t? Data::ForumGeneralIconTitle()\n'
+                  '\t\t\t: topic->title());\n'
+                  '\t\tif (topic->closed()) {\n'
+                  '\t\t\tparts << tr::lng_hours_closed(tr::now);\n'
+                  '\t\t}\n'
+                  '\t\tconst auto entry = row->entry();\n'
+                  '\t\tif (entry->isPinnedDialog(filterId)) {\n'
+                  '\t\t\tparts << tr::lng_sr_chat_pinned(tr::now);\n'
+                  '\t\t}\n'
+                  '\t\tconst auto badges = entry->chatListBadgesState();\n'
+                  '\t\tif (badges.unreadCounter > 0) {\n'
+                  '\t\t\tparts << tr::lng_sr_chat_unread(\n'
+                  '\t\t\t\ttr::now,\n'
+                  '\t\t\t\tlt_count,\n'
+                  '\t\t\t\tbadges.unreadCounter);\n'
+                  '\t\t} else if (badges.unread) {\n'
+                  '\t\t\tparts << tr::lng_settings_quick_dialog_action_unread(\n'
+                  '\t\t\t\ttr::now);\n'
+                  '\t\t}\n'
+                  '\t\tif (badges.mention) {\n'
+                  '\t\t\tparts << tr::lng_sr_chat_mention(tr::now);\n'
+                  '\t\t}\n'
+                  '\t\tconst auto history = topic->history();\n'
+                  '\t\tconst auto peer = topic->peer();\n'
+                  '\t\tif (const auto item = topic->chatListMessage()) {\n'
+                  '\t\t\tparts += MessageTailParts(item, history, peer);\n'
+                  '\t\t}\n'
+                  '\t\treturn parts.join(u", "_q);\n'
+                  '\t}\n')
+              if old_topic not in src:
+                  print('ERROR: RowAccessibilityName topic block not found')
+                  exit(1)
+              src = src.replace(old_topic, new_topic, 1)
+
+              old_sub = (
+                  '\tif (const auto topic = row->topic()) {\n'
+                  '\t\tswitch (item) {\n'
+                  '\t\tcase SubItem::Type:\n'
+                  '\t\t\treturn tr::lng_sr_chat_topic(tr::now);\n'
+                  '\t\tcase SubItem::Name:\n'
+                  '\t\t\treturn topic->isGeneral()\n'
+                  '\t\t\t\t? Data::ForumGeneralIconTitle()\n'
+                  '\t\t\t\t: topic->title();\n'
+                  '\t\tcase SubItem::Closed:\n'
+                  '\t\t\tif (topic->closed()) {\n'
+                  '\t\t\t\treturn tr::lng_hours_closed(tr::now);\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn {};\n'
+                  '\t\tdefault:\n'
+                  '\t\t\treturn {};\n'
+                  '\t\t}\n'
+                  '\t}\n')
+              new_sub = (
+                  '\tif (const auto topic = row->topic()) {\n'
+                  '\t\tconst auto entry = row->entry();\n'
+                  '\t\tswitch (item) {\n'
+                  '\t\tcase SubItem::Type:\n'
+                  '\t\t\treturn tr::lng_sr_chat_topic(tr::now);\n'
+                  '\t\tcase SubItem::Name:\n'
+                  '\t\t\treturn topic->isGeneral()\n'
+                  '\t\t\t\t? Data::ForumGeneralIconTitle()\n'
+                  '\t\t\t\t: topic->title();\n'
+                  '\t\tcase SubItem::Closed:\n'
+                  '\t\t\tif (topic->closed()) {\n'
+                  '\t\t\t\treturn tr::lng_hours_closed(tr::now);\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn {};\n'
+                  '\t\tcase SubItem::Pinned:\n'
+                  '\t\t\tif (entry->isPinnedDialog(filterId)) {\n'
+                  '\t\t\t\treturn tr::lng_sr_chat_pinned(tr::now);\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn {};\n'
+                  '\t\tcase SubItem::Unread: {\n'
+                  '\t\t\tconst auto badges = entry->chatListBadgesState();\n'
+                  '\t\t\tif (badges.unreadCounter > 0) {\n'
+                  '\t\t\t\treturn tr::lng_sr_chat_unread(\n'
+                  '\t\t\t\t\ttr::now,\n'
+                  '\t\t\t\t\tlt_count,\n'
+                  '\t\t\t\t\tbadges.unreadCounter);\n'
+                  '\t\t\t} else if (badges.unread) {\n'
+                  '\t\t\t\treturn tr::lng_settings_quick_dialog_action_unread(\n'
+                  '\t\t\t\t\ttr::now);\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn {};\n'
+                  '\t\t}\n'
+                  '\t\tcase SubItem::Mention: {\n'
+                  '\t\t\tconst auto badges = entry->chatListBadgesState();\n'
+                  '\t\t\tif (badges.mention) {\n'
+                  '\t\t\t\treturn tr::lng_sr_chat_mention(tr::now);\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn {};\n'
+                  '\t\t}\n'
+                  '\t\tcase SubItem::Message: {\n'
+                  '\t\t\tconst auto chatItem = topic->chatListMessage();\n'
+                  '\t\t\tif (!chatItem || chatItem->isService()) {\n'
+                  '\t\t\t\treturn {};\n'
+                  '\t\t\t}\n'
+                  '\t\t\tauto messageText = chatItem->notificationText().text;\n'
+                  '\t\t\tif (messageText.isEmpty()) {\n'
+                  '\t\t\t\treturn {};\n'
+                  '\t\t\t}\n'
+                  '\t\t\tconstexpr auto kMaxMessageLength = 100;\n'
+                  '\t\t\tif (messageText.size() > kMaxMessageLength) {\n'
+                  '\t\t\t\tmessageText = messageText.left(kMaxMessageLength)\n'
+                  '\t\t\t\t\t+ u"..."_q;\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn messageText;\n'
+                  '\t\t}\n'
+                  '\t\tcase SubItem::Time: {\n'
+                  '\t\t\tconst auto chatItem = topic->chatListMessage();\n'
+                  '\t\t\tif (!chatItem || chatItem->isService()) {\n'
+                  '\t\t\t\treturn {};\n'
+                  '\t\t\t}\n'
+                  '\t\t\tconst auto dateTime = ItemDateTime(chatItem);\n'
+                  '\t\t\tif (!dateTime.isValid()) {\n'
+                  '\t\t\t\treturn {};\n'
+                  '\t\t\t}\n'
+                  '\t\t\tconst auto now = QDateTime::currentDateTime();\n'
+                  '\t\t\tif (dateTime.date() == now.date()) {\n'
+                  '\t\t\t\treturn QLocale().toString(\n'
+                  '\t\t\t\t\tdateTime.time(),\n'
+                  '\t\t\t\t\tQLocale::ShortFormat);\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn Ui::FormatDateTime(dateTime);\n'
+                  '\t\t}\n'
+                  '\t\tdefault:\n'
+                  '\t\t\treturn {};\n'
+                  '\t\t}\n'
+                  '\t}\n')
+              if old_sub not in src:
+                  print('ERROR: SubItemValue topic block not found')
+                  exit(1)
+              src = src.replace(old_sub, new_sub, 1)
+
+              with open(a11y_cpp, 'w', encoding='utf-8') as f:
+                  f.write(src)
+              print('dialogs_inner_widget_accessibility.cpp: forum topics patched')
+
+          with open(inner_cpp, 'r', encoding='utf-8') as f:
+              inner = f.read()
+
+          if 'a11y-forum-panel-accessible-name' not in inner:
+              needle = (
+                  '\trefreshWithCollapsedRows(true);\n'
+                  '\tif (_loadMoreCallback) {\n'
+                  '\t\t_loadMoreCallback();\n'
+                  '\t}\n\n'
+                  '\tif (!forum) {\n'
+                  '\t\trestoreChatsFilterScrollState(_filterId);\n'
+                  '\t}\n'
+                  '}\n')
+              repl = (
+                  '\trefreshWithCollapsedRows(true);\n'
+                  '\tif (_loadMoreCallback) {\n'
+                  '\t\t_loadMoreCallback();\n'
+                  '\t}\n\n'
+                  '\t// a11y-forum-panel-accessible-name: F6 announces topics vs chats.\n'
+                  '\tsetAccessibleName(forum\n'
+                  '\t\t? QString::fromUtf8("Список тем")\n'
+                  '\t\t: QString::fromUtf8("Список чатов"));\n'
+                  '\tQAccessibleEvent panelNameChanged(\n'
+                  '\t\tthis, QAccessible::NameChanged);\n'
+                  '\tQAccessible::updateAccessibility(&panelNameChanged);\n\n'
+                  '\tif (!forum) {\n'
+                  '\t\trestoreChatsFilterScrollState(_filterId);\n'
+                  '\t}\n'
+                  '}\n')
+              if needle not in inner:
+                  print('ERROR: changeOpenedForum landmark not found')
+                  exit(1)
+              inner = inner.replace(needle, repl, 1)
+              with open(inner_cpp, 'w', encoding='utf-8') as f:
+                  f.write(inner)
+              print('dialogs_inner_widget.cpp: forum panel accessible name')
+
+      # ============================================
+      # 7m. Info panel shortcuts + media list names.
+      #   Ctrl+Shift+I / Ctrl+Shift+F (keyboard filter)
+      #   call Q_INVOKABLE methods on TopBarWidget.
+      # ============================================
+      - name: Patch TopBar for info and shared files shortcuts
+        shell: python
+        run: |
+          import os, re
+
+          h_path = ('tdesktop/Telegram/SourceFiles/history/view/'
+                    'history_view_top_bar_widget.h')
+          cpp_path = ('tdesktop/Telegram/SourceFiles/history/view/'
+                      'history_view_top_bar_widget.cpp')
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skip TopBar a11y patch')
+                  exit(0)
+
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'accessibilityToggleInfo' in h:
+              print('top_bar_widget.h already patched')
+          else:
+              h, n = re.subn(
+                  r'(class\s+TopBarWidget\s+final\s*:\s*public\s+Ui::RpWidget\s*\{)',
+                  lambda m: m.group(1) + '\n\tQ_OBJECT\n',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: TopBarWidget class header not found')
+                  exit(1)
+              decl = (
+                  '\n\tQ_INVOKABLE void accessibilityToggleInfo();'
+                  '\n\tQ_INVOKABLE void accessibilityShowSharedMediaFiles();\n')
+              h, n = re.subn(
+                  r'(void\s+toggleInfoSection\s*\(\s*\)\s*;)',
+                  lambda m: m.group(1) + decl,
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: toggleInfoSection landmark not found')
+                  exit(1)
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('top_bar_widget.h patched')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'accessibilityToggleInfo' in cpp:
+              print('top_bar_widget.cpp already patched')
+          else:
+              impl = (
+                  '\n'
+                  '// === Accessibility: screen-reader shortcuts ===\n'
+                  'void TopBarWidget::accessibilityToggleInfo() {\n'
+                  '\ttoggleInfoSection();\n'
+                  '}\n'
+                  '\n'
+                  'void TopBarWidget::accessibilityShowSharedMediaFiles() {\n'
+                  '\tconst auto key = _activeChat.key;\n'
+                  '\tif (!key.peer()) {\n'
+                  '\t\treturn;\n'
+                  '\t}\n'
+                  '\tauto params = Window::SectionShow();\n'
+                  '\tif (_controller->canShowThirdSection()) {\n'
+                  '\t\tCore::App().settings().setThirdSectionInfoEnabled(true);\n'
+                  '\t\tCore::App().saveSettingsDelayed();\n'
+                  '\t\tparams = params.withThirdColumn();\n'
+                  '\t\tif (_controller->adaptive().isThreeColumn()) {\n'
+                  '\t\t\t_controller->showSection(\n'
+                  '\t\t\t\t(key.topic()\n'
+                  '\t\t\t\t\t? std::make_shared<Info::Memento>(\n'
+                  '\t\t\t\t\t\tkey.topic(),\n'
+                  '\t\t\t\t\t\tInfo::Section(Storage::SharedMediaType::File))\n'
+                  '\t\t\t\t\t: (key.sublist() && key.sublist()->parentChat())\n'
+                  '\t\t\t\t\t? std::make_shared<Info::Memento>(\n'
+                  '\t\t\t\t\t\tkey.sublist(),\n'
+                  '\t\t\t\t\t\tInfo::Section(Storage::SharedMediaType::File))\n'
+                  '\t\t\t\t\t: std::make_shared<Info::Memento>(\n'
+                  '\t\t\t\t\t\tkey.peer(),\n'
+                  '\t\t\t\t\t\tInfo::Section(Storage::SharedMediaType::File))),\n'
+                  '\t\t\t\tparams);\n'
+                  '\t\t\treturn;\n'
+                  '\t\t}\n'
+                  '\t}\n'
+                  '\t_controller->resizeForThirdSection();\n'
+                  '\t_controller->updateColumnLayout();\n'
+                  '\tparams = params.withThirdColumn();\n'
+                  '\tif (key.topic()) {\n'
+                  '\t\t_controller->showSection(\n'
+                  '\t\t\tstd::make_shared<Info::Memento>(\n'
+                  '\t\t\t\tkey.topic(),\n'
+                  '\t\t\t\tInfo::Section(Storage::SharedMediaType::File)),\n'
+                  '\t\t\tparams);\n'
+                  '\t} else if (key.sublist() && key.sublist()->parentChat()) {\n'
+                  '\t\t_controller->showSection(\n'
+                  '\t\t\tstd::make_shared<Info::Memento>(\n'
+                  '\t\t\t\tkey.sublist(),\n'
+                  '\t\t\t\tInfo::Section(Storage::SharedMediaType::File)),\n'
+                  '\t\t\tparams);\n'
+                  '\t} else {\n'
+                  '\t\t_controller->showSection(\n'
+                  '\t\t\tstd::make_shared<Info::Memento>(\n'
+                  '\t\t\t\tkey.peer(),\n'
+                  '\t\t\t\tInfo::Section(Storage::SharedMediaType::File)),\n'
+                  '\t\t\tparams);\n'
+                  '\t}\n'
+                  '}\n'
+              )
+              cpp, n_impl = re.subn(
+                  r'(\n}\s*//\s*namespace\s+HistoryView\s*\n?)\Z',
+                  lambda m: '\n' + impl + m.group(1),
+                  cpp,
+                  count=1)
+              if n_impl == 0:
+                  print('ERROR: namespace HistoryView close not found')
+                  exit(1)
+              with open(cpp_path, 'w', encoding='utf-8') as f:
+                  f.write(cpp)
+              print('top_bar_widget.cpp patched')
+
+      - name: Patch shared media list accessible names
+        shell: python
+        run: |
+          import os, re
+
+          cpp = ('tdesktop/Telegram/SourceFiles/info/media/'
+                 'info_media_inner_widget.cpp')
+          if not os.path.exists(cpp):
+              print(f'WARNING: missing {cpp} — skip media list name patch')
+              exit(0)
+
+          with open(cpp, 'r', encoding='utf-8') as f:
+              src = f.read()
+
+          if 'a11y-media-list-accessible-name' in src:
+              print('info_media_inner_widget.cpp already patched')
+              exit(0)
+
+          if '#include "lang/lang_keys.h"' not in src:
+              src2, n = re.subn(
+                  r'(#include\s+"info/media/info_media_inner_widget\.h"\s*\n)',
+                  lambda m: m.group(1) + '#include "lang/lang_keys.h"\n',
+                  src,
+                  count=1)
+              if n:
+                  src = src2
+
+          needle = '\treturn result;\n}\n\nvoid InnerWidget::saveState'
+          repl = (
+              '\t// a11y-media-list-accessible-name: F6 + NVDA read tab title.\n'
+              '\tresult->setAccessibleName(\n'
+              '\t\tSharedMediaTitle(_controller->section().mediaType())(tr::now));\n'
+              '\n\treturn result;\n}\n\nvoid InnerWidget::saveState')
+          if needle not in src:
+              print('ERROR: InnerWidget::setupList return landmark not found')
+              exit(1)
+          src = src.replace(needle, repl, 1)
+          with open(cpp, 'w', encoding='utf-8') as f:
+              f.write(src)
+          print('info_media_inner_widget.cpp: media list accessible name set')
+
+
+
+      # ============================================
+      # 7n. Shared media list — arrow keys, NVDA speech, Enter to open.
+      # ============================================
+      - name: Patch Info Media ListWidget for arrow-key navigation
+        shell: python
+        run: |
+          import os, re
+
+          h_path = ('tdesktop/Telegram/SourceFiles/info/media/'
+                    'info_media_list_widget.h')
+          cpp_path = ('tdesktop/Telegram/SourceFiles/info/media/'
+                      'info_media_list_widget.cpp')
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skip media list a11y patch')
+                  exit(0)
+
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'a11yProcessKey' in h:
+              print('info_media_list_widget.h already patched')
+          else:
+              h, n = re.subn(
+                  r'(class\s+ListWidget\s+final\s*'
+                  r':\s*public\s+Ui::RpWidget[^\{]*\{)',
+                  lambda m: m.group(0) + '\n\tQ_OBJECT\n',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: ListWidget class header not found')
+                  exit(1)
+
+              a11y_decl = (
+                  '\n\t// Accessibility (NVDA / screen readers)\n'
+                  '\tQAccessible::Role accessibilityRole() override;\n'
+                  '\tQt::FocusPolicy accessibilityFocusPolicy() override;\n'
+                  '\tint accessibilityChildCount() const override;\n'
+                  '\tQString accessibilityChildName(int index) const override;\n'
+                  '\tQAccessible::State accessibilityChildState(int index) const override;\n'
+                  '\tQAccessible::Role accessibilityChildRole() const override;\n'
+                  '\tQRect accessibilityChildRect(int index) const override;\n'
+                  '\tbool a11yProcessKey(QKeyEvent *e);\n'
+                  '\tQ_INVOKABLE void a11yActivateFocused();\n')
+
+              h, n = re.subn(
+                  r'(void\s+openDocument\s*\([^;]+\)\s*override\s*;)',
+                  lambda m: m.group(1) + a11y_decl,
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: openDocument override landmark not found')
+                  exit(1)
+
+              h, n = re.subn(
+                  r'(void\s+paintEvent\s*\(\s*QPaintEvent\s*\*\s*e\s*\)\s*override\s*;)',
+                  '\tvoid keyPressEvent(QKeyEvent *e) override;\n\\1',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: paintEvent landmark not found')
+                  exit(1)
+
+              fields = (
+                  '\n\tstruct A11yFlatItem {\n'
+                  '\t\tnot_null<BaseLayout*> layout;\n'
+                  '\t\tQRect rect;\n'
+                  '\t\tnot_null<const HistoryItem*> item;\n'
+                  '\t};\n'
+                  '\tmutable std::vector<A11yFlatItem> _a11yFlatItems;\n'
+                  '\tint _a11yCurrentIndex = -1;\n'
+                  '\tvoid a11yRecomputeItems() const;\n'
+                  '\tQString a11yItemLabel(not_null<const HistoryItem*> item) const;\n'
+                  '\tvoid a11yScrollToIndex(int index);\n')
+
+              h, n = re.subn(
+                  r'(bool\s+_inDragArea\s*=\s*false\s*;)',
+                  fields + r'\n\1',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: _inDragArea field landmark not found')
+                  exit(1)
+
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('info_media_list_widget.h patched')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'ListWidget::a11yProcessKey' in cpp:
+              print('info_media_list_widget.cpp already patched')
+              exit(0)
+
+          if 'telegram_accessibility_keyboard.h' not in cpp:
+              cpp, n_inc = re.subn(
+                  r'(#include\s+"info/media/info_media_list_widget\.h"\s*\n)',
+                  lambda m: m.group(1)
+                      + '#include <QKeyEvent>\n'
+                      + '#include "history/history_item.h"\n'
+                      + '#include "ui/accessibility/telegram_accessibility_keyboard.h"\n',
+                  cpp,
+                  count=1)
+              if n_inc == 0:
+                  print('ERROR: list_widget include landmark not found')
+                  exit(1)
+
+          impl = (
+              '\n'
+              '// Accessibility: shared media list (files / links / photos)\n'
+              'void ListWidget::a11yRecomputeItems() const {\n'
+              '\t_a11yFlatItems.clear();\n'
+              '\tfor (const auto &section : _sections) {\n'
+              '\t\tfor (const auto layout : section.items()) {\n'
+              '\t\t\tif (!layout) {\n'
+              '\t\t\t\tcontinue;\n'
+              '\t\t\t}\n'
+              '\t\t\tconst auto item = layout->getItem();\n'
+              '\t\t\tif (!item) {\n'
+              '\t\t\t\tcontinue;\n'
+              '\t\t\t}\n'
+              '\t\t\tconst auto found = const_cast<ListWidget*>(this)->findItemDetails(layout);\n'
+              '\t\t\t_a11yFlatItems.push_back({ layout, found.geometry, item });\n'
+              '\t\t}\n'
+              '\t}\n'
+              '}\n'
+              '\n'
+              'QString ListWidget::a11yItemLabel(not_null<const HistoryItem*> item) const {\n'
+              '\tQStringList parts;\n'
+              '\tif (const auto from = item->from()) {\n'
+              '\t\tconst auto name = from->name();\n'
+              '\t\tif (!name.isEmpty()) {\n'
+              '\t\t\tparts << name;\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\tauto text = item->notificationText().text.simplified();\n'
+              '\tif (text.isEmpty()) {\n'
+              '\t\tif (const auto media = item->media()) {\n'
+              '\t\t\tif (const auto document = media->document()) {\n'
+              '\t\t\t\ttext = document->filename();\n'
+              '\t\t\t}\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\tif (!text.isEmpty()) {\n'
+              '\t\tif (text.size() > 120) {\n'
+              '\t\t\ttext = text.left(120) + QString::fromUtf8("…");\n'
+              '\t\t}\n'
+              '\t\tparts << text;\n'
+              '\t}\n'
+              '\treturn parts.join(QString::fromUtf8(", "));\n'
+              '}\n'
+              '\n'
+              'void ListWidget::a11yScrollToIndex(int index) {\n'
+              '\tif (index < 0 || index >= int(_a11yFlatItems.size())) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\t_scrollToRequests.fire(_a11yFlatItems[index].rect.y());\n'
+              '}\n'
+              '\n'
+              'QAccessible::Role ListWidget::accessibilityRole() {\n'
+              '\treturn QAccessible::List;\n'
+              '}\n'
+              '\n'
+              'Qt::FocusPolicy ListWidget::accessibilityFocusPolicy() {\n'
+              '\treturn Qt::StrongFocus;\n'
+              '}\n'
+              '\n'
+              'int ListWidget::accessibilityChildCount() const {\n'
+              '\tconst_cast<ListWidget*>(this)->a11yRecomputeItems();\n'
+              '\treturn int(_a11yFlatItems.size());\n'
+              '}\n'
+              '\n'
+              'QString ListWidget::accessibilityChildName(int index) const {\n'
+              '\tif (index < 0 || index >= int(_a11yFlatItems.size())) {\n'
+              '\t\treturn QString();\n'
+              '\t}\n'
+              '\treturn a11yItemLabel(_a11yFlatItems[index].item);\n'
+              '}\n'
+              '\n'
+              'QAccessible::State ListWidget::accessibilityChildState(int index) const {\n'
+              '\tQAccessible::State state;\n'
+              '\tstate.focusable = true;\n'
+              '\tif (index == _a11yCurrentIndex) {\n'
+              '\t\tstate.focused = true;\n'
+              '\t\tstate.selected = true;\n'
+              '\t\tstate.active = true;\n'
+              '\t}\n'
+              '\treturn state;\n'
+              '}\n'
+              '\n'
+              'QAccessible::Role ListWidget::accessibilityChildRole() const {\n'
+              '\treturn QAccessible::ListItem;\n'
+              '}\n'
+              '\n'
+              'QRect ListWidget::accessibilityChildRect(int index) const {\n'
+              '\tif (index < 0 || index >= int(_a11yFlatItems.size())) {\n'
+              '\t\treturn QRect();\n'
+              '\t}\n'
+              '\treturn _a11yFlatItems[index].rect;\n'
+              '}\n'
+              '\n'
+              'bool ListWidget::a11yProcessKey(QKeyEvent *e) {\n'
+              '\tconst auto key = e->key();\n'
+              '\tconst auto isDown = (key == Qt::Key_Down);\n'
+              '\tconst auto isUp = (key == Qt::Key_Up);\n'
+              '\tconst auto isPageDown = (key == Qt::Key_PageDown);\n'
+              '\tconst auto isPageUp = (key == Qt::Key_PageUp);\n'
+              '\tconst auto isHome = (key == Qt::Key_Home);\n'
+              '\tconst auto isEnd = (key == Qt::Key_End);\n'
+              '\tif (!isDown && !isUp && !isPageDown && !isPageUp && !isHome && !isEnd) {\n'
+              '\t\treturn false;\n'
+              '\t}\n'
+              '\tif (e->modifiers()\n'
+              '\t\t& (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) {\n'
+              '\t\treturn false;\n'
+              '\t}\n'
+              '\ta11yRecomputeItems();\n'
+              '\tconst int total = int(_a11yFlatItems.size());\n'
+              '\tif (total <= 0) {\n'
+              '\t\treturn false;\n'
+              '\t}\n'
+              '\tconst int prev = _a11yCurrentIndex;\n'
+              '\tint next = prev;\n'
+              '\tif (isHome) {\n'
+              '\t\tnext = 0;\n'
+              '\t} else if (isEnd) {\n'
+              '\t\tnext = total - 1;\n'
+              '\t} else if (isDown) {\n'
+              '\t\tnext = (prev < 0) ? 0 : std::min(prev + 1, total - 1);\n'
+              '\t} else if (isUp) {\n'
+              '\t\tnext = (prev < 0) ? (total - 1) : std::max(prev - 1, 0);\n'
+              '\t} else if (isPageDown) {\n'
+              '\t\tnext = (prev < 0) ? 0 : std::min(prev + 5, total - 1);\n'
+              '\t} else if (isPageUp) {\n'
+              '\t\tnext = (prev < 0) ? (total - 1) : std::max(prev - 5, 0);\n'
+              '\t}\n'
+              '\t_a11yCurrentIndex = next;\n'
+              '\tif (prev != next) {\n'
+              '\t\taccessibilityChildFocused(next);\n'
+              '\t\ta11yScrollToIndex(next);\n'
+              '\t\tconst auto label = accessibilityChildName(next);\n'
+              '\t\tif (!label.isEmpty()) {\n'
+              '\t\t\tTgAccessibility::nvda::SpeakForced(label, 0);\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\treturn true;\n'
+              '}\n'
+              '\n'
+              'void ListWidget::a11yActivateFocused() {\n'
+              '\ta11yRecomputeItems();\n'
+              '\tif (_a11yCurrentIndex < 0 || _a11yCurrentIndex >= int(_a11yFlatItems.size())) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tconst auto layout = _a11yFlatItems[_a11yCurrentIndex].layout;\n'
+              '\tconst auto item = layout->getItem();\n'
+              '\tif (!item) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tconst auto id = item->fullId();\n'
+              '\tif (const auto media = item->media()) {\n'
+              '\t\tif (const auto photo = media->photo()) {\n'
+              '\t\t\topenPhoto(photo, id);\n'
+              '\t\t\treturn;\n'
+              '\t\t}\n'
+              '\t\tif (const auto document = media->document()) {\n'
+              '\t\t\topenDocument(document, id, true);\n'
+              '\t\t\treturn;\n'
+              '\t\t}\n'
+              '\t}\n'
+              '}\n'
+              '\n'
+              'void ListWidget::keyPressEvent(QKeyEvent *e) {\n'
+              '\tif (a11yProcessKey(e)) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tUi::RpWidget::keyPressEvent(e);\n'
+              '}\n'
+          )
+
+          cpp, n_impl = re.subn(
+              r'(\n}\s*//\s*namespace\s+Media\s*\n}\s*//\s*namespace\s+Info)',
+              lambda m: impl + m.group(1),
+              cpp,
+              count=1)
+          if n_impl == 0:
+              print('ERROR: Info::Media namespace close not found')
+              exit(1)
+
+          with open(cpp_path, 'w', encoding='utf-8') as f:
+              f.write(cpp)
+          print('info_media_list_widget.cpp patched (media list a11y)')
+
+      - name: Patch TopBar for shared links shortcut
+        shell: python
+        run: |
+          import os
+
+          h_path = ('tdesktop/Telegram/SourceFiles/history/view/'
+                    'history_view_top_bar_widget.h')
+          cpp_path = ('tdesktop/Telegram/SourceFiles/history/view/'
+                      'history_view_top_bar_widget.cpp')
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skip links shortcut patch')
+                  exit(0)
+
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'accessibilityShowSharedMediaLinks' not in h:
+              if 'accessibilityShowSharedMediaFiles' not in h:
+                  print('WARNING: TopBar files shortcut missing — skip links')
+                  exit(0)
+              h = h.replace(
+                  'Q_INVOKABLE void accessibilityShowSharedMediaFiles();',
+                  'Q_INVOKABLE void accessibilityShowSharedMediaFiles();\n'
+                  '\tQ_INVOKABLE void accessibilityShowSharedMediaLinks();',
+                  1)
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('top_bar_widget.h: links shortcut declared')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'accessibilityShowSharedMediaLinks' in cpp:
+              print('top_bar_widget.cpp: links shortcut already present')
+              exit(0)
+
+          if 'accessibilityShowSharedMediaFiles' not in cpp:
+              print('WARNING: TopBar files impl missing — skip links')
+              exit(0)
+
+          links_impl = (
+              '\n'
+              'void TopBarWidget::accessibilityShowSharedMediaLinks() {\n'
+              '\tconst auto key = _activeChat.key;\n'
+              '\tif (!key.peer()) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tauto params = Window::SectionShow();\n'
+              '\tif (_controller->canShowThirdSection()) {\n'
+              '\t\tCore::App().settings().setThirdSectionInfoEnabled(true);\n'
+              '\t\tCore::App().saveSettingsDelayed();\n'
+              '\t\tparams = params.withThirdColumn();\n'
+              '\t\tif (_controller->adaptive().isThreeColumn()) {\n'
+              '\t\t\t_controller->showSection(\n'
+              '\t\t\t\t(key.topic()\n'
+              '\t\t\t\t\t? std::make_shared<Info::Memento>(\n'
+              '\t\t\t\t\t\tkey.topic(),\n'
+              '\t\t\t\t\t\tInfo::Section(Storage::SharedMediaType::Link))\n'
+              '\t\t\t\t\t: (key.sublist() && key.sublist()->parentChat())\n'
+              '\t\t\t\t\t? std::make_shared<Info::Memento>(\n'
+              '\t\t\t\t\t\tkey.sublist(),\n'
+              '\t\t\t\t\t\tInfo::Section(Storage::SharedMediaType::Link))\n'
+              '\t\t\t\t\t: std::make_shared<Info::Memento>(\n'
+              '\t\t\t\t\t\tkey.peer(),\n'
+              '\t\t\t\t\t\tInfo::Section(Storage::SharedMediaType::Link))),\n'
+              '\t\t\t\tparams);\n'
+              '\t\t\treturn;\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\t_controller->resizeForThirdSection();\n'
+              '\t_controller->updateColumnLayout();\n'
+              '\tparams = params.withThirdColumn();\n'
+              '\tif (key.topic()) {\n'
+              '\t\t_controller->showSection(\n'
+              '\t\t\tstd::make_shared<Info::Memento>(\n'
+              '\t\t\t\tkey.topic(),\n'
+              '\t\t\t\tInfo::Section(Storage::SharedMediaType::Link)),\n'
+              '\t\t\tparams);\n'
+              '\t} else if (key.sublist() && key.sublist()->parentChat()) {\n'
+              '\t\t_controller->showSection(\n'
+              '\t\t\tstd::make_shared<Info::Memento>(\n'
+              '\t\t\t\tkey.sublist(),\n'
+              '\t\t\t\tInfo::Section(Storage::SharedMediaType::Link)),\n'
+              '\t\t\tparams);\n'
+              '\t} else {\n'
+              '\t\t_controller->showSection(\n'
+              '\t\t\tstd::make_shared<Info::Memento>(\n'
+              '\t\t\t\tkey.peer(),\n'
+              '\t\t\t\tInfo::Section(Storage::SharedMediaType::Link)),\n'
+              '\t\t\tparams);\n'
+              '\t}\n'
+              '}\n'
+          )
+
+          cpp = cpp.replace(
+              'void TopBarWidget::accessibilityShowSharedMediaFiles() {',
+              links_impl
+              + '\nvoid TopBarWidget::accessibilityShowSharedMediaFiles() {',
+              1)
+
+          with open(cpp_path, 'w', encoding='utf-8') as f:
+              f.write(cpp)
+          print('top_bar_widget.cpp: links shortcut added')
       # ============================================
       # 8. Cache third-party libraries
       # ============================================
@@ -2143,21 +2938,30 @@ jobs:
             - **`Telegram.exe` + `nvdaControllerClient.dll`** — портативный
               вариант. Скачайте оба файла в одну папку и запустите .exe.
 
-            ### Горячие клавиши
-            - **F6 / Shift+F6** — переключение между панелями
-              (Чаты ↔ Сообщения ↔ Поле ввода)
-            - **Стрелки вверх/вниз** — навигация по списку чатов и
-              сообщениям (имя отправителя + текст/вложение)
-            - **Tab / Shift+Tab** — ссылки и вложения в выбранном сообщении
-            - **Enter** — открыть вложение или воспроизвести медиа
-            - **Ctrl+Shift+R** — записать / отправить голосовое сообщение
-            - **Ctrl+Shift+B** — клавиатура бота (стрелки, Enter)
-            - **Ctrl+Shift+T** — тест озвучки NVDA
-            - **Home / End** — первый / последний чат в списке
-            - **Escape** — вернуться в список чатов
-            - **Ctrl+Shift+F6** — диагностический дамп дерева виджетов
-              (для отчётов о проблемах)
+            ### Новое в v1.2.0
+            - Полные названия строк в **списке чатов** и **темах форума**
+              («Список тем»), озвучка NVDA при смене фокуса
+            - **F6** переключает чаты, сообщения, ввод, клавиатуру бота,
+              списки **файлов / ссылок / медиа** и профиль (если открыты)
+            - **Ctrl+Shift+F** / **Ctrl+Shift+U** — быстрый доступ к
+              файлам и ссылкам чата; **Ctrl+Shift+I** — профиль
+            - **Стрелки**, Home/End, Page Up/Down в списках медиа;
+              **Enter** открывает выбранный элемент
+            - Улучшена навигация по ссылкам в пересланных сообщениях
 
+            ### Горячие клавиши
+            - **F6 / Shift+F6** — панели (чаты → сообщения → ввод → медиа → профиль)
+            - **Стрелки** — чаты, сообщения, файлы/ссылки/фото в боковой панели
+            - **Home / End** — к началу / концу списка чатов или медиа
+            - **Tab / Shift+Tab** — ссылки и вложения в сообщении
+            - **Enter** — открыть вложение или элемент в списке медиа
+            - **Ctrl+Shift+F** / **Ctrl+Shift+U** — списки файлов и ссылок
+            - **Ctrl+Shift+I** — профиль чата
+            - **Ctrl+Shift+R** — голосовое сообщение
+            - **Ctrl+Shift+T** — тест озвучки NVDA
+            - **Escape** — в список чатов (или «Список тем» в форуме)
+            - **Ctrl+Shift+F6** — диагностический дамп виджетов
+              (для отчётов о проблемах)
             > Собрано на базе tdesktop@${{ env.SHORT_SHA }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

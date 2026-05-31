@@ -14,10 +14,6 @@ namespace TgAccessibility {
 
 namespace detail {
 
-inline QWidget *FindTopBar(QWidget *root) {
-	return FindByType(root, "HistoryView::TopBarWidget");
-}
-
 inline QWidget *FindBotKeyboard(QWidget *root) {
 	auto *kb = FindByType(root, "BotKeyboard");
 	if (kb && kb->isVisible()) {

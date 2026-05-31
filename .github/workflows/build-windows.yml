@@ -106,6 +106,8 @@ jobs:
               SourceFiles/ui/accessibility/telegram_accessibility.h
               SourceFiles/ui/accessibility/telegram_accessibility_names.h
               SourceFiles/ui/accessibility/telegram_accessibility_keyboard.h
+              SourceFiles/ui/accessibility/telegram_accessibility_text.h
+              SourceFiles/ui/accessibility/telegram_accessibility_live.h
           )
           # === End accessibility layer ===
           PATCH
@@ -1126,7 +1128,7 @@ jobs:
               '\n\t\t\t\t\t\treturn;'
               '\n\t\t\t\t\t}'
               '\n\t\t\t\t\tsetAccessibleName(a11yChatName);'
-              '\n\t\t\t\t\tTgAccessibility::nvda::SpeakForced(a11yChatName);'
+              '\n\t\t\t\t\tTgAccessibility::nvda::SpeakChatList(a11yChatName);'
               '\n\t\t\t\t\tQAccessibleEvent delayedNameChanged('
               '\n\t\t\t\t\t\tthis, QAccessible::NameChanged);'
               '\n\t\t\t\t\tQAccessible::updateAccessibility(&delayedNameChanged);'
@@ -1565,6 +1567,8 @@ jobs:
 
           void HistoryInner::a11yActivateFocused() {
               if (!_accessibilityFocusedItem) {
+                  TgAccessibility::nvda::Speak(
+                      QStringLiteral("Сначала выберите сообщение стрелками"));
                   return;
               }
               const auto item = _accessibilityFocusedItem;
@@ -1611,6 +1615,10 @@ jobs:
                   }
               }
               if (link) {
+                  // a11y-open-attachment-speech
+                  TgAccessibility::nvda::Speak(
+                      QStringLiteral("Открытие файла или ссылки"));
+
                   ActivateClickHandler(
                       window(),
                       link,
@@ -1766,6 +1774,10 @@ jobs:
                   f.write(cpp)
           else:
               print('history_inner_widget message summary patch already applied')
+
+      - name: Apply extended accessibility upstream patches
+        shell: bash
+        run: python accessibility-patch/scripts/a11y_upstream_patches.py
 
       # ============================================
       # 8. Cache third-party libraries
@@ -2139,7 +2151,9 @@ jobs:
             - **Tab / Shift+Tab** — ссылки и вложения в выбранном сообщении
             - **Enter** — открыть вложение или воспроизвести медиа
             - **Ctrl+Shift+R** — записать / отправить голосовое сообщение
+            - **Ctrl+Shift+B** — клавиатура бота (стрелки, Enter)
             - **Ctrl+Shift+T** — тест озвучки NVDA
+            - **Home / End** — первый / последний чат в списке
             - **Escape** — вернуться в список чатов
             - **Ctrl+Shift+F6** — диагностический дамп дерева виджетов
               (для отчётов о проблемах)

@@ -14,6 +14,9 @@ namespace TgAccessibility {
 // Call once at application startup
 void Install();
 
+// Start periodic status announcements (typing, bot keyboard).
+void InstallLiveAnnouncer();
+
 // Factory: Qt calls this to get an accessible interface for any QObject
 QAccessibleInterface *Factory(const QString &classname, QObject *object);
 

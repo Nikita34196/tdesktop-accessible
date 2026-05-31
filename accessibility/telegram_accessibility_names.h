@@ -43,6 +43,8 @@ inline void ApplyNames(QWidget *root) {
         { "AttachButton",     "AttachButton",     nullptr, "Прикрепить файл" },
         { "EmojiButton",      "EmojiButton",      nullptr, "Эмодзи и стикеры" },
         { "BotKeyboardShow",  nullptr,            nullptr, "Показать клавиатуру бота" },
+        { "BotKeyboardHide",  nullptr,            nullptr, "Скрыть клавиатуру бота" },
+        { "BotKeyboard",      "BotKeyboard",      nullptr, "Клавиатура бота" },
         { "VoiceRecordButton", "VoiceRecordButton", nullptr, "Записать голосовое сообщение" },
         { "RecordButton",     "RecordButton",     nullptr, "Записать голосовое сообщение" },
         { "ScheduleButton",   "ScheduleButton",   nullptr, "Отложенная отправка" },

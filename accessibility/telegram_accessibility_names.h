@@ -43,8 +43,6 @@ inline void ApplyNames(QWidget *root) {
         { "AttachButton",     "AttachButton",     nullptr, "Прикрепить файл" },
         { "EmojiButton",      "EmojiButton",      nullptr, "Эмодзи и стикеры" },
         { "BotKeyboardShow",  nullptr,            nullptr, "Показать клавиатуру бота" },
-        { "BotKeyboardHide",  nullptr,            nullptr, "Скрыть клавиатуру бота" },
-        { "BotKeyboard",      "BotKeyboard",      nullptr, "Клавиатура бота" },
         { "VoiceRecordButton", "VoiceRecordButton", nullptr, "Записать голосовое сообщение" },
         { "RecordButton",     "RecordButton",     nullptr, "Записать голосовое сообщение" },
         { "ScheduleButton",   "ScheduleButton",   nullptr, "Отложенная отправка" },
@@ -71,6 +69,10 @@ inline void ApplyNames(QWidget *root) {
         { "MainWidget",       "MainWidget",       nullptr, "Главное окно" },
         { "SideBarButton",    "SideBarButton",    nullptr, "Боковая панель" },
         { "InfoWidget",       "InfoWidget",       nullptr, "Информация о чате" },
+        { "Info::Profile::InnerWidget", nullptr, nullptr, "Профиль чата" },
+        { "Info::Media::ListWidget", nullptr, nullptr, "Медиа и файлы" },
+        { "Info::Media::Widget", nullptr, nullptr, "Общие медиа" },
+        { "HistoryView::TopBarWidget", "TopBarWidget", nullptr, "Заголовок чата" },
 
         // -- Calls --
         { "CallButton",       "CallButton",       nullptr, "Позвонить" },

@@ -2008,6 +2008,164 @@ jobs:
               print('dialogs_inner_widget.cpp: forum panel accessible name')
 
       # ============================================
+      # 7m. Info panel shortcuts + media list names.
+      #   Ctrl+Shift+I / Ctrl+Shift+F (keyboard filter)
+      #   call Q_INVOKABLE methods on TopBarWidget.
+      # ============================================
+      - name: Patch TopBar for info and shared files shortcuts
+        shell: python
+        run: |
+          import os, re
+
+          h_path = ('tdesktop/Telegram/SourceFiles/history/view/'
+                    'history_view_top_bar_widget.h')
+          cpp_path = ('tdesktop/Telegram/SourceFiles/history/view/'
+                      'history_view_top_bar_widget.cpp')
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skip TopBar a11y patch')
+                  exit(0)
+
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'accessibilityToggleInfo' in h:
+              print('top_bar_widget.h already patched')
+          else:
+              h, n = re.subn(
+                  r'(class\s+TopBarWidget\s+final\s*:\s*public\s+Ui::RpWidget\s*\{)',
+                  lambda m: m.group(1) + '\n\tQ_OBJECT\n',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: TopBarWidget class header not found')
+                  exit(1)
+              decl = (
+                  '\n\tQ_INVOKABLE void accessibilityToggleInfo();'
+                  '\n\tQ_INVOKABLE void accessibilityShowSharedMediaFiles();\n')
+              h, n = re.subn(
+                  r'(void\s+toggleInfoSection\s*\(\s*\)\s*;)',
+                  lambda m: m.group(1) + decl,
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: toggleInfoSection landmark not found')
+                  exit(1)
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('top_bar_widget.h patched')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'accessibilityToggleInfo' in cpp:
+              print('top_bar_widget.cpp already patched')
+          else:
+              impl = (
+                  '\n'
+                  '// === Accessibility: screen-reader shortcuts ===\n'
+                  'void TopBarWidget::accessibilityToggleInfo() {\n'
+                  '\ttoggleInfoSection();\n'
+                  '}\n'
+                  '\n'
+                  'void TopBarWidget::accessibilityShowSharedMediaFiles() {\n'
+                  '\tconst auto key = _activeChat.key;\n'
+                  '\tif (!key.peer()) {\n'
+                  '\t\treturn;\n'
+                  '\t}\n'
+                  '\tauto params = Window::SectionShow();\n'
+                  '\tif (_controller->canShowThirdSection()) {\n'
+                  '\t\tCore::App().settings().setThirdSectionInfoEnabled(true);\n'
+                  '\t\tCore::App().saveSettingsDelayed();\n'
+                  '\t\tparams = params.withThirdColumn();\n'
+                  '\t\tif (_controller->adaptive().isThreeColumn()) {\n'
+                  '\t\t\t_controller->showSection(\n'
+                  '\t\t\t\t(key.topic()\n'
+                  '\t\t\t\t\t? std::make_shared<Info::Memento>(\n'
+                  '\t\t\t\t\t\tkey.topic(),\n'
+                  '\t\t\t\t\t\tInfo::Section(Storage::SharedMediaType::File))\n'
+                  '\t\t\t\t\t: (key.sublist() && key.sublist()->parentChat())\n'
+                  '\t\t\t\t\t? std::make_shared<Info::Memento>(\n'
+                  '\t\t\t\t\t\tkey.sublist(),\n'
+                  '\t\t\t\t\t\tInfo::Section(Storage::SharedMediaType::File))\n'
+                  '\t\t\t\t\t: std::make_shared<Info::Memento>(\n'
+                  '\t\t\t\t\t\tkey.peer(),\n'
+                  '\t\t\t\t\t\tInfo::Section(Storage::SharedMediaType::File))),\n'
+                  '\t\t\t\tparams);\n'
+                  '\t\t\treturn;\n'
+                  '\t\t}\n'
+                  '\t}\n'
+                  '\t_controller->resizeForThirdSection();\n'
+                  '\t_controller->updateColumnLayout();\n'
+                  '\tparams = params.withThirdColumn();\n'
+                  '\tif (key.topic()) {\n'
+                  '\t\t_controller->showSection(\n'
+                  '\t\t\tstd::make_shared<Info::Memento>(\n'
+                  '\t\t\t\tkey.topic(),\n'
+                  '\t\t\t\tInfo::Section(Storage::SharedMediaType::File)),\n'
+                  '\t\t\tparams);\n'
+                  '\t} else if (key.sublist() && key.sublist()->parentChat()) {\n'
+                  '\t\t_controller->showSection(\n'
+                  '\t\t\tstd::make_shared<Info::Memento>(\n'
+                  '\t\t\t\tkey.sublist(),\n'
+                  '\t\t\t\tInfo::Section(Storage::SharedMediaType::File)),\n'
+                  '\t\t\tparams);\n'
+                  '\t} else {\n'
+                  '\t\t_controller->showSection(\n'
+                  '\t\t\tstd::make_shared<Info::Memento>(\n'
+                  '\t\t\t\tkey.peer(),\n'
+                  '\t\t\t\tInfo::Section(Storage::SharedMediaType::File)),\n'
+                  '\t\t\tparams);\n'
+                  '\t}\n'
+                  '}\n'
+              )
+              cpp, n_impl = re.subn(
+                  r'(\n}\s*//\s*namespace\s+HistoryView\s*\n?)\Z',
+                  lambda m: '\n' + impl + m.group(1),
+                  cpp,
+                  count=1)
+              if n_impl == 0:
+                  print('ERROR: namespace HistoryView close not found')
+                  exit(1)
+              with open(cpp_path, 'w', encoding='utf-8') as f:
+                  f.write(cpp)
+              print('top_bar_widget.cpp patched')
+
+      - name: Patch shared media list accessible names
+        shell: python
+        run: |
+          import os
+
+          cpp = ('tdesktop/Telegram/SourceFiles/info/media/'
+                 'info_media_inner_widget.cpp')
+          if not os.path.exists(cpp):
+              print(f'WARNING: missing {cpp} — skip media list name patch')
+              exit(0)
+
+          with open(cpp, 'r', encoding='utf-8') as f:
+              src = f.read()
+
+          if 'a11y-media-list-accessible-name' in src:
+              print('info_media_inner_widget.cpp already patched')
+              exit(0)
+
+          needle = '\treturn result;\n}\n\nvoid InnerWidget::saveState'
+          repl = (
+              '\t// a11y-media-list-accessible-name: F6 + NVDA read tab title.\n'
+              '\tresult->setAccessibleName(\n'
+              '\t\tSharedMediaTitle(_controller->section().mediaType())());\n'
+              '\n\treturn result;\n}\n\nvoid InnerWidget::saveState')
+          if needle not in src:
+              print('ERROR: InnerWidget::setupList return landmark not found')
+              exit(1)
+          src = src.replace(needle, repl, 1)
+          with open(cpp, 'w', encoding='utf-8') as f:
+              f.write(src)
+          print('info_media_inner_widget.cpp: media list accessible name set')
+
+
+      # ============================================
       # 8. Cache third-party libraries
       # ============================================
       - name: Generate cache key

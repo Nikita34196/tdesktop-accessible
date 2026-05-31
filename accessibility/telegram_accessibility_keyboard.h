@@ -825,7 +825,7 @@ protected:
             }
             const auto panels = discoverPanels();
             for (const auto &p : panels) {
-                if (p.second == QLatin1String("Список чатов")) {
+                if (detail::IsChatListPanel(p.first)) {
                     focusAndAnnounce(p.first, p.second);
                     return true;
                 }

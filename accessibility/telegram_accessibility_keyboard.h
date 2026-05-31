@@ -396,22 +396,15 @@ inline void Speak(const QString &text) {
 // preview + direction + timestamp, easily >200 chars). Shorter
 // strings pass through; cap aggressively so we always stay under
 // whatever NVDA's internal limit turns out to be.
-inline void SpeakForced(const QString &text) {
+inline void SpeakForced(const QString &text, int maxChars = 110) {
     EnsureLoaded();
     if (text.isEmpty()) return;
 
-    // The row names coming from lib_ui may contain newlines and wide
-    // whitespace between row fields. NVDA's controller client is more
-    // reliable with a compact one-line phrase.
     QString trimmed = text.simplified();
     if (trimmed.isEmpty()) return;
 
-    // Truncate but keep the meaningful prefix. NVDA reads the chat
-    // title first in the lib_ui-built string, so the first ~110
-    // chars are the most informative bit.
-    constexpr int kMaxChars = 110;
-    if (trimmed.size() > kMaxChars) {
-        trimmed = trimmed.left(kMaxChars) + QStringLiteral("…");
+    if (maxChars > 0 && trimmed.size() > maxChars) {
+        trimmed = trimmed.left(maxChars) + QStringLiteral("…");
     }
 
     long rc = SpeakOnce(trimmed);
@@ -447,12 +440,12 @@ inline QString &LastMessagePhrase() {
 
 // Chat list: compact label + skip immediate duplicate (NVDA + patch 7g).
 inline void SpeakChatList(const QString &raw) {
-    const auto phrase = detail::CompactChatListLabel(raw);
+    const auto phrase = detail::ChatListSpeechLabel(raw);
     if (phrase.isEmpty() || phrase == LastChatListPhrase()) {
         return;
     }
     LastChatListPhrase() = phrase;
-    SpeakForced(phrase);
+    SpeakForced(phrase, 0);
 }
 
 // Messages: compact summary + skip duplicate on same row.
@@ -995,8 +988,12 @@ private:
         if (auto *outer = detail::FindByType(root, "Dialogs::Widget")) {
             QWidget *focusTarget = detail::FindByType(
                 outer, "Dialogs::InnerWidget");
-            out.append({ focusTarget ? focusTarget : outer,
-                QStringLiteral("Список чатов") });
+            const auto panel = focusTarget ? focusTarget : outer;
+            const auto panelName = panel->accessibleName().simplified();
+            out.append({ panel,
+                panelName.isEmpty()
+                    ? QStringLiteral("Список чатов")
+                    : panelName });
         }
 
         // 2) Message history — focus the inner scrollable list.

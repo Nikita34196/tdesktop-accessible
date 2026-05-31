@@ -1781,10 +1781,6 @@ jobs:
 
       # ============================================
       # 7i. Forwarded-message channel links (Tab / Enter navigation).
-      #
-      # Forward headers ("Forwarded from …") sit in the top ~48px of a
-      # bubble. The coarse grid in a11yCollectFocusedLinks often misses
-      # the channel-name ClickHandler, so NVDA says "no links".
       # ============================================
       - name: Patch HistoryInner forward-header link scan
         shell: python
@@ -1838,11 +1834,223 @@ jobs:
           if marker not in cpp:
               print('ERROR: a11yCollectFocusedLinks scan landmark not found')
               exit(1)
-
           cpp = cpp.replace(marker, insert, 1)
           with open(cpp_path, 'w', encoding='utf-8') as f:
               f.write(cpp)
           print('history_inner_widget.cpp: forward-header link scan added')
+
+
+      # ============================================
+      # 7k. Forum topic list — full row labels + panel name.
+      # ============================================
+      - name: Patch forum topic list accessibility
+        shell: python
+        run: |
+          import os
+
+          a11y_cpp = (
+              'tdesktop/Telegram/SourceFiles/dialogs/'
+              'dialogs_inner_widget_accessibility.cpp')
+          inner_cpp = (
+              'tdesktop/Telegram/SourceFiles/dialogs/'
+              'dialogs_inner_widget.cpp')
+
+          for path in (a11y_cpp, inner_cpp):
+              if not os.path.exists(path):
+                  print(f'WARNING: missing {path} — skip forum topic patch')
+                  exit(0)
+
+          with open(a11y_cpp, 'r', encoding='utf-8') as f:
+              src = f.read()
+
+          if 'a11y-forum-topic-full-row' not in src:
+              old_topic = (
+                  '\tif (const auto topic = row->topic()) {\n'
+                  '\t\tconst auto title = topic->isGeneral()\n'
+                  '\t\t\t? Data::ForumGeneralIconTitle()\n'
+                  '\t\t\t: topic->title();\n'
+                  '\t\treturn tr::lng_sr_chat_topic(tr::now) + u" "_q + title;\n'
+                  '\t}\n')
+              new_topic = (
+                  '\tif (const auto topic = row->topic()) {\n'
+                  '\t\t// a11y-forum-topic-full-row: same richness as chats.\n'
+                  '\t\tQStringList parts;\n'
+                  '\t\tparts << tr::lng_sr_chat_topic(tr::now);\n'
+                  '\t\tparts << (topic->isGeneral()\n'
+                  '\t\t\t? Data::ForumGeneralIconTitle()\n'
+                  '\t\t\t: topic->title());\n'
+                  '\t\tif (topic->closed()) {\n'
+                  '\t\t\tparts << tr::lng_hours_closed(tr::now);\n'
+                  '\t\t}\n'
+                  '\t\tconst auto entry = row->entry();\n'
+                  '\t\tif (entry->isPinnedDialog(filterId)) {\n'
+                  '\t\t\tparts << tr::lng_sr_chat_pinned(tr::now);\n'
+                  '\t\t}\n'
+                  '\t\tconst auto badges = entry->chatListBadgesState();\n'
+                  '\t\tif (badges.unreadCounter > 0) {\n'
+                  '\t\t\tparts << tr::lng_sr_chat_unread(\n'
+                  '\t\t\t\ttr::now,\n'
+                  '\t\t\t\tlt_count,\n'
+                  '\t\t\t\tbadges.unreadCounter);\n'
+                  '\t\t} else if (badges.unread) {\n'
+                  '\t\t\tparts << tr::lng_settings_quick_dialog_action_unread(\n'
+                  '\t\t\t\ttr::now);\n'
+                  '\t\t}\n'
+                  '\t\tif (badges.mention) {\n'
+                  '\t\t\tparts << tr::lng_sr_chat_mention(tr::now);\n'
+                  '\t\t}\n'
+                  '\t\tconst auto history = topic->history();\n'
+                  '\t\tconst auto peer = topic->peer();\n'
+                  '\t\tif (const auto item = topic->chatListMessage()) {\n'
+                  '\t\t\tparts += MessageTailParts(item, history, peer);\n'
+                  '\t\t}\n'
+                  '\t\treturn parts.join(u", "_q);\n'
+                  '\t}\n')
+              if old_topic not in src:
+                  print('ERROR: RowAccessibilityName topic block not found')
+                  exit(1)
+              src = src.replace(old_topic, new_topic, 1)
+
+              old_sub = (
+                  '\tif (const auto topic = row->topic()) {\n'
+                  '\t\tswitch (item) {\n'
+                  '\t\tcase SubItem::Type:\n'
+                  '\t\t\treturn tr::lng_sr_chat_topic(tr::now);\n'
+                  '\t\tcase SubItem::Name:\n'
+                  '\t\t\treturn topic->isGeneral()\n'
+                  '\t\t\t\t? Data::ForumGeneralIconTitle()\n'
+                  '\t\t\t\t: topic->title();\n'
+                  '\t\tcase SubItem::Closed:\n'
+                  '\t\t\tif (topic->closed()) {\n'
+                  '\t\t\t\treturn tr::lng_hours_closed(tr::now);\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn {};\n'
+                  '\t\tdefault:\n'
+                  '\t\t\treturn {};\n'
+                  '\t\t}\n'
+                  '\t}\n')
+              new_sub = (
+                  '\tif (const auto topic = row->topic()) {\n'
+                  '\t\tconst auto entry = row->entry();\n'
+                  '\t\tswitch (item) {\n'
+                  '\t\tcase SubItem::Type:\n'
+                  '\t\t\treturn tr::lng_sr_chat_topic(tr::now);\n'
+                  '\t\tcase SubItem::Name:\n'
+                  '\t\t\treturn topic->isGeneral()\n'
+                  '\t\t\t\t? Data::ForumGeneralIconTitle()\n'
+                  '\t\t\t\t: topic->title();\n'
+                  '\t\tcase SubItem::Closed:\n'
+                  '\t\t\tif (topic->closed()) {\n'
+                  '\t\t\t\treturn tr::lng_hours_closed(tr::now);\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn {};\n'
+                  '\t\tcase SubItem::Pinned:\n'
+                  '\t\t\tif (entry->isPinnedDialog(filterId)) {\n'
+                  '\t\t\t\treturn tr::lng_sr_chat_pinned(tr::now);\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn {};\n'
+                  '\t\tcase SubItem::Unread: {\n'
+                  '\t\t\tconst auto badges = entry->chatListBadgesState();\n'
+                  '\t\t\tif (badges.unreadCounter > 0) {\n'
+                  '\t\t\t\treturn tr::lng_sr_chat_unread(\n'
+                  '\t\t\t\t\ttr::now,\n'
+                  '\t\t\t\t\tlt_count,\n'
+                  '\t\t\t\t\tbadges.unreadCounter);\n'
+                  '\t\t\t} else if (badges.unread) {\n'
+                  '\t\t\t\treturn tr::lng_settings_quick_dialog_action_unread(\n'
+                  '\t\t\t\t\ttr::now);\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn {};\n'
+                  '\t\t}\n'
+                  '\t\tcase SubItem::Mention: {\n'
+                  '\t\t\tconst auto badges = entry->chatListBadgesState();\n'
+                  '\t\t\tif (badges.mention) {\n'
+                  '\t\t\t\treturn tr::lng_sr_chat_mention(tr::now);\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn {};\n'
+                  '\t\t}\n'
+                  '\t\tcase SubItem::Message: {\n'
+                  '\t\t\tconst auto chatItem = topic->chatListMessage();\n'
+                  '\t\t\tif (!chatItem || chatItem->isService()) {\n'
+                  '\t\t\t\treturn {};\n'
+                  '\t\t\t}\n'
+                  '\t\t\tauto messageText = chatItem->notificationText().text;\n'
+                  '\t\t\tif (messageText.isEmpty()) {\n'
+                  '\t\t\t\treturn {};\n'
+                  '\t\t\t}\n'
+                  '\t\t\tconstexpr auto kMaxMessageLength = 100;\n'
+                  '\t\t\tif (messageText.size() > kMaxMessageLength) {\n'
+                  '\t\t\t\tmessageText = messageText.left(kMaxMessageLength)\n'
+                  '\t\t\t\t\t+ u"..."_q;\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn messageText;\n'
+                  '\t\t}\n'
+                  '\t\tcase SubItem::Time: {\n'
+                  '\t\t\tconst auto chatItem = topic->chatListMessage();\n'
+                  '\t\t\tif (!chatItem || chatItem->isService()) {\n'
+                  '\t\t\t\treturn {};\n'
+                  '\t\t\t}\n'
+                  '\t\t\tconst auto dateTime = ItemDateTime(chatItem);\n'
+                  '\t\t\tif (!dateTime.isValid()) {\n'
+                  '\t\t\t\treturn {};\n'
+                  '\t\t\t}\n'
+                  '\t\t\tconst auto now = QDateTime::currentDateTime();\n'
+                  '\t\t\tif (dateTime.date() == now.date()) {\n'
+                  '\t\t\t\treturn QLocale().toString(\n'
+                  '\t\t\t\t\tdateTime.time(),\n'
+                  '\t\t\t\t\tQLocale::ShortFormat);\n'
+                  '\t\t\t}\n'
+                  '\t\t\treturn Ui::FormatDateTime(dateTime);\n'
+                  '\t\t}\n'
+                  '\t\tdefault:\n'
+                  '\t\t\treturn {};\n'
+                  '\t\t}\n'
+                  '\t}\n')
+              if old_sub not in src:
+                  print('ERROR: SubItemValue topic block not found')
+                  exit(1)
+              src = src.replace(old_sub, new_sub, 1)
+
+              with open(a11y_cpp, 'w', encoding='utf-8') as f:
+                  f.write(src)
+              print('dialogs_inner_widget_accessibility.cpp: forum topics patched')
+
+          with open(inner_cpp, 'r', encoding='utf-8') as f:
+              inner = f.read()
+
+          if 'a11y-forum-panel-accessible-name' not in inner:
+              needle = (
+                  '\trefreshWithCollapsedRows(true);\n'
+                  '\tif (_loadMoreCallback) {\n'
+                  '\t\t_loadMoreCallback();\n'
+                  '\t}\n\n'
+                  '\tif (!forum) {\n'
+                  '\t\trestoreChatsFilterScrollState(_filterId);\n'
+                  '\t}\n'
+                  '}\n')
+              repl = (
+                  '\trefreshWithCollapsedRows(true);\n'
+                  '\tif (_loadMoreCallback) {\n'
+                  '\t\t_loadMoreCallback();\n'
+                  '\t}\n\n'
+                  '\t// a11y-forum-panel-accessible-name: F6 announces topics vs chats.\n'
+                  '\tsetAccessibleName(forum\n'
+                  '\t\t? QString::fromUtf8("Список тем")\n'
+                  '\t\t: QString::fromUtf8("Список чатов"));\n'
+                  '\tQAccessibleEvent panelNameChanged(\n'
+                  '\t\tthis, QAccessible::NameChanged);\n'
+                  '\tQAccessible::updateAccessibility(&panelNameChanged);\n\n'
+                  '\tif (!forum) {\n'
+                  '\t\trestoreChatsFilterScrollState(_filterId);\n'
+                  '\t}\n'
+                  '}\n')
+              if needle not in inner:
+                  print('ERROR: changeOpenedForum landmark not found')
+                  exit(1)
+              inner = inner.replace(needle, repl, 1)
+              with open(inner_cpp, 'w', encoding='utf-8') as f:
+                  f.write(inner)
+              print('dialogs_inner_widget.cpp: forum panel accessible name')
 
       # ============================================
       # 8. Cache third-party libraries

@@ -196,10 +196,8 @@ def patch_history_widget():
             // === Accessibility: pinned + stickers ===
             void HistoryWidget::accessibilityOpenPinnedMessages() {
             \tcheckPinnedBarState();
-            \tif (_pinnedBar && _pinnedBar->isVisible()) {
-            \t\t_pinnedBar->setAccessibleName(
-            \t\t\tQStringLiteral("Закреплённые сообщения"));
-            \t\t_pinnedBar->setFocus(Qt::ShortcutFocusReason);
+            \t// Ui::PinnedBar is not a QWidget (no setFocus/isVisible).
+            \tif (_pinnedBar && _pinnedBar->height() > 0) {
             \t\tTgAccessibility::nvda::SpeakForced(
             \t\t\tQStringLiteral("Закреплённые сообщения"));
             \t\treturn;

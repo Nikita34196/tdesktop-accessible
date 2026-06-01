@@ -2552,14 +2552,11 @@ jobs:
               '}\n'
           )
 
-          cpp, n_impl = re.subn(
-              r'(\n}\s*//\s*namespace\s+Media\s*\n}\s*//\s*namespace\s+Info)\Z',
-              lambda m: impl + m.group(1),
-              cpp,
-              count=1)
-          if n_impl == 0:
+          anchor = '\n} // namespace Media\n} // namespace Info'
+          if anchor not in cpp:
               print('ERROR: Info::Media namespace close not found in inner_widget')
               exit(1)
+          cpp = cpp.replace(anchor, impl + anchor, 1)
 
           with open(cpp_path, 'w', encoding='utf-8') as f:
               f.write(cpp)

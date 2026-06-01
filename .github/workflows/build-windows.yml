@@ -2219,6 +2219,7 @@ jobs:
                   '\tQAccessible::Role accessibilityChildRole() const override;\n'
                   '\tQRect accessibilityChildRect(int index) const override;\n'
                   '\tbool a11yProcessKey(QKeyEvent *e);\n'
+                  '\tQ_INVOKABLE void a11yAnnounceCurrentRow();\n'
                   '\tQ_INVOKABLE void a11yActivateFocused();\n')
 
               h, n = re.subn(
@@ -2419,7 +2420,7 @@ jobs:
               '\t\ta11yScrollToIndex(next);\n'
               '\t\tconst auto label = accessibilityChildName(next);\n'
               '\t\tif (!label.isEmpty()) {\n'
-              '\t\t\tTgAccessibility::nvda::SpeakForced(label, 0);\n'
+              '\t\t\ta11yAnnounceCurrentRow();\n'
               '\t\t}\n'
               '\t}\n'
               '\treturn true;\n'
@@ -2448,6 +2449,28 @@ jobs:
               '\t}\n'
               '}\n'
               '\n'
+              '\n'
+              'void ListWidget::a11yAnnounceCurrentRow() {\n'
+              '\ta11yRecomputeItems();\n'
+              '\tconst int total = int(_a11yFlatItems.size());\n'
+              '\tif (total <= 0) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tif (_a11yCurrentIndex < 0 || _a11yCurrentIndex >= total) {\n'
+              '\t\t_a11yCurrentIndex = 0;\n'
+              '\t}\n'
+              '\tconst auto label = accessibilityChildName(_a11yCurrentIndex);\n'
+              '\tif (label.isEmpty()) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\taccessibilityChildFocused(_a11yCurrentIndex);\n'
+              '\tsetAccessibleName(label);\n'
+              '\tQAccessibleEvent nameChanged(this, QAccessible::NameChanged);\n'
+              '\tQAccessible::updateAccessibility(&nameChanged);\n'
+              '\tQAccessibleEvent focusEv(this, QAccessible::Focus);\n'
+              '\tQAccessible::updateAccessibility(&focusEv);\n'
+              '\tTgAccessibility::nvda::SpeakForced(label, 0);\n'
+              '}\n'
               'void ListWidget::keyPressEvent(QKeyEvent *e) {\n'
               '\tif (a11yProcessKey(e)) {\n'
               '\t\treturn;\n'
@@ -2468,6 +2491,79 @@ jobs:
           with open(cpp_path, 'w', encoding='utf-8') as f:
               f.write(cpp)
           print('info_media_list_widget.cpp patched (media list a11y)')
+
+
+      # 7n-b. Forward arrow keys from InnerWidget to ListWidget (NVDA).
+      - name: Patch Info Media InnerWidget for list arrow forwarding
+        shell: python
+        run: |
+          import os, re
+
+          h_path = ('tdesktop/Telegram/SourceFiles/info/media/'
+                    'info_media_inner_widget.h')
+          cpp_path = ('tdesktop/Telegram/SourceFiles/info/media/'
+                      'info_media_inner_widget.cpp')
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skip inner media a11y')
+                  exit(0)
+
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'keyPressEvent' not in h:
+              h, n = re.subn(
+                  r'(protected:\s*\n)',
+                  r'\1\tvoid keyPressEvent(QKeyEvent *e) override;\n\n',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: InnerWidget protected: section not found')
+                  exit(1)
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('info_media_inner_widget.h: keyPressEvent declared')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'InnerWidget::keyPressEvent' in cpp:
+              print('info_media_inner_widget.cpp already forwards keys')
+              exit(0)
+
+          if '#include <QKeyEvent>' not in cpp:
+              cpp, n = re.subn(
+                  r'(#include\s+"info/media/info_media_inner_widget\.h"\s*\n)',
+                  lambda m: m.group(1) + '#include <QKeyEvent>\n',
+                  cpp,
+                  count=1)
+              if n == 0:
+                  print('ERROR: inner_widget include landmark not found')
+                  exit(1)
+
+          impl = (
+              '\n'
+              'void InnerWidget::keyPressEvent(QKeyEvent *e) {\n'
+              '\tif (_list && _list->a11yProcessKey(e)) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tRpWidget::keyPressEvent(e);\n'
+              '}\n'
+          )
+
+          cpp, n_impl = re.subn(
+              r'(\n}\s*//\s*namespace\s+Media\s*\n}\s*//\s*namespace\s+Info)\Z',
+              lambda m: impl + m.group(1),
+              cpp,
+              count=1)
+          if n_impl == 0:
+              print('ERROR: Info::Media namespace close not found in inner_widget')
+              exit(1)
+
+          with open(cpp_path, 'w', encoding='utf-8') as f:
+              f.write(cpp)
+          print('info_media_inner_widget.cpp: arrow keys forwarded to ListWidget')
 
       - name: Patch TopBar for shared links shortcut
         shell: python

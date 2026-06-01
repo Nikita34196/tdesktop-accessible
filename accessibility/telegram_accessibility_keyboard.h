@@ -16,7 +16,6 @@
 #include <QKeyEvent>
 #include <QApplication>
 #include <QAccessible>
-#include <QAccessibleActionInterface>
 #include <QDebug>
 #include <QList>
 #include <QPair>
@@ -647,7 +646,6 @@ inline QWidget *FindTopBar(QWidget *root) {
     return FindByType(root, "HistoryView::TopBarWidget");
 }
 
-
 inline QWidget *FindHistoryWidget(QWidget *root) {
     return FindByType(root, "HistoryWidget");
 }
@@ -683,13 +681,6 @@ inline QWidget *FindGroupCallBar(QWidget *root) {
     return FindByTypeAny(root, "GroupCallBar");
 }
 
-inline QWidget *FindTabbedSelector(QWidget *root) {
-    return FindByTypeAny(root, "TabbedSelector");
-}
-
-inline QWidget *FindEmojiButton(QWidget *root) {
-    return FindByTypeAny(root, "EmojiButton");
-}
 
 } // namespace detail
 
@@ -951,10 +942,6 @@ protected:
                                     if (!detail::IsUselessListItemName(name)) {
                                         nvda::SpeakMessage(name);
                                     }
-                                } else if (detail::IsSharedMediaListPanel(alive.data())) {
-                                    if (!detail::IsUselessListItemName(name)) {
-                                        nvda::SpeakForced(name);
-                                    }
                                 }
                             } else {
                                 summary += QStringLiteral(
@@ -1138,22 +1125,14 @@ protected:
                     const bool ok = QMetaObject::invokeMethod(
                         history, "accessibilityToggleStickers",
                         Qt::DirectConnection);
-                    if (ok) {
-                        LogLine(QStringLiteral(
-                            "Ctrl+Shift+K -> HistoryWidget.accessibilityToggleStickers"));
-                        return true;
-                    }
-                }
-                if (QWidget *emoji = detail::FindEmojiButton(root)) {
-                    if (QAccessibleInterface *iface = QAccessible::queryAccessibleInterface(emoji)) {
-                        iface->actionInterface()->doAction(QAccessibleActionInterface::PressAction);
-                    } else {
-                        emoji->click();
-                    }
-                    nvda::Speak(QStringLiteral("Эмодзи и стикеры"));
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+K -> HistoryWidget.accessibilityToggleStickers"
+                        " invoked=%1").arg(ok ? 1 : 0));
                     return true;
                 }
             }
+            nvda::Speak(QStringLiteral(
+                "Откройте чат для панели стикеров"));
             return true;
         }
         if (key == Qt::Key_C
@@ -1168,11 +1147,11 @@ protected:
                 }
                 if (QWidget *topBar = detail::FindTopBar(root)) {
                     const bool ok = QMetaObject::invokeMethod(
-                        topBar, "groupCall",
+                        topBar, "accessibilityJoinGroupCall",
                         Qt::DirectConnection);
                     LogLine(QStringLiteral(
-                        "Ctrl+Shift+C -> TopBar.groupCall invoked=%1")
-                        .arg(ok ? 1 : 0));
+                        "Ctrl+Shift+C -> TopBar.accessibilityJoinGroupCall"
+                        " invoked=%1").arg(ok ? 1 : 0));
                     return true;
                 }
             }
@@ -1267,8 +1246,7 @@ private:
         }
 
 
-        // 5) Shared media (files / links / photos) in the info column.
-        if (QWidget *media = FindSharedMediaList(root)) {
+        if (QWidget *media = detail::FindSharedMediaList(root)) {
             if (media->isVisible()) {
                 const auto mediaName = media->accessibleName().simplified();
                 out.append({ media,
@@ -1278,22 +1256,19 @@ private:
             }
         }
 
-        // 6) Chat profile when the info panel is open.
-        if (QWidget *profile = FindProfileInner(root)) {
+        if (QWidget *profile = detail::FindProfileInner(root)) {
             if (profile->isVisible()) {
                 out.append({ profile, QStringLiteral("Профиль чата") });
             }
         }
 
-        // 7) Active group voice/video call bar.
-        if (QWidget *callBar = FindGroupCallBar(root)) {
+        if (QWidget *callBar = detail::FindGroupCallBar(root)) {
             if (callBar->isVisible()) {
                 out.append({ callBar, QStringLiteral("Групповой звонок") });
             }
         }
 
-        // 8) Global search in the chat list column.
-        if (QWidget *search = FindDialogsSearch(root)) {
+        if (QWidget *search = detail::FindDialogsSearch(root)) {
             if (search->isVisible()) {
                 out.append({ search, QStringLiteral("Поиск чатов") });
             }

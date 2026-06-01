@@ -635,6 +635,61 @@ inline bool IsSharedMediaListPanel(QWidget *w) {
     return w && DynamicTypeName(w) == QLatin1String("Info::Media::ListWidget");
 }
 
+
+inline bool IsSharedMediaInnerPanel(QWidget *w) {
+    return w && DynamicTypeName(w) == QLatin1String("Info::Media::InnerWidget");
+}
+
+// Shared-media panel: focus often sits on InnerWidget while arrow
+// handling and NVDA speech live on ListWidget (workflow patch 7n).
+inline QWidget *FindSharedMediaListWidget(QWidget *from) {
+    if (!from) {
+        return nullptr;
+    }
+    if (IsSharedMediaListPanel(from)) {
+        return from;
+    }
+    for (QWidget *w = from; w; w = w->parentWidget()) {
+        if (QWidget *list = FindByType(w, "Info::Media::ListWidget")) {
+            return list;
+        }
+        if (QWidget *list = FindByTypeAny(w, "Info::Media::ListWidget")) {
+            return list;
+        }
+    }
+    if (QWidget *root = from->window()) {
+        return FindByTypeAny(root, "Info::Media::ListWidget");
+    }
+    return nullptr;
+}
+
+inline void AnnounceSharedMediaListRow(QWidget *list) {
+    if (!list) {
+        return;
+    }
+    QMetaObject::invokeMethod(
+        list,
+        "a11yAnnounceCurrentRow",
+        Qt::DirectConnection);
+}
+
+inline void FocusSharedMediaList(QWidget *root) {
+    QWidget *list = FindSharedMediaListWidget(root);
+    if (!list) {
+        list = FindByTypeAny(root, "Info::Media::ListWidget");
+    }
+    if (!list) {
+        return;
+    }
+    if (list->focusPolicy() == Qt::NoFocus) {
+        list->setFocusPolicy(Qt::StrongFocus);
+    }
+    list->setFocus(Qt::ShortcutFocusReason);
+    QAccessibleEvent focusEv(list, QAccessible::Focus);
+    QAccessible::updateAccessibility(&focusEv);
+    AnnounceSharedMediaListRow(list);
+}
+
 inline QWidget *FindTopBar(QWidget *root) {
     if (!root) return nullptr;
     if (QWidget *history = FindByType(root, "HistoryWidget")) {
@@ -645,6 +700,42 @@ inline QWidget *FindTopBar(QWidget *root) {
     }
     return FindByType(root, "HistoryView::TopBarWidget");
 }
+
+inline QWidget *FindHistoryWidget(QWidget *root) {
+    return FindByType(root, "HistoryWidget");
+}
+
+inline QWidget *FindDialogsSearch(QWidget *root) {
+    if (QWidget *dialogs = FindByType(root, "Dialogs::Widget")) {
+        if (QWidget *field = FindByType(dialogs, "Ui::InputField")) {
+            if (field->isVisible()) {
+                return field;
+            }
+        }
+    }
+    return nullptr;
+}
+
+inline QWidget *FindSharedMediaList(QWidget *root) {
+    return FindByTypeAny(root, "Info::Media::ListWidget");
+}
+
+inline QWidget *FindProfileInner(QWidget *root) {
+    return FindByTypeAny(root, "Info::Profile::InnerWidget");
+}
+
+inline QWidget *FindGroupCallBar(QWidget *root) {
+    if (QWidget *history = FindHistoryWidget(root)) {
+        if (QWidget *bar = FindByType(history, "GroupCallBar")) {
+            return bar;
+        }
+        if (QWidget *bar = FindByType(history, "Ui::GroupCallBar")) {
+            return bar;
+        }
+    }
+    return FindByTypeAny(root, "GroupCallBar");
+}
+
 
 } // namespace detail
 
@@ -864,7 +955,8 @@ protected:
                 const auto type = detail::DynamicTypeName(focused);
                 if (detail::IsChatListPanel(focused)
                     || detail::IsMessageListPanel(focused)
-                    || detail::IsSharedMediaListPanel(focused)) {
+                    || detail::IsSharedMediaListPanel(focused)
+                    || detail::IsSharedMediaInnerPanel(focused)) {
                     // Let the keypress run normally first, then read state.
                     QPointer<QWidget> alive(focused);
                     const QString keyName = (key == Qt::Key_Up) ? "Up"
@@ -916,6 +1008,19 @@ protected:
                         }
                         LogLine(summary);
                     });
+                    // Files panel: focus is often on InnerWidget, not
+                    // ListWidget — patch 7n keyPressEvent may not run.
+                    if (detail::IsSharedMediaInnerPanel(focused)) {
+                        QPointer<QWidget> inner(focused);
+                        QTimer::singleShot(80, [inner] {
+                            if (!inner) {
+                                return;
+                            }
+                            detail::AnnounceSharedMediaListRow(
+                                detail::FindSharedMediaListWidget(
+                                    inner.data()));
+                        });
+                    }
                 }
             }
         }
@@ -986,6 +1091,13 @@ protected:
                     LogLine(QStringLiteral(
                         "Ctrl+Shift+F -> TopBar.accessibilityShowSharedMediaFiles"
                         " invoked=%1").arg(ok ? 1 : 0));
+                    QPointer<QWidget> rootPtr(root);
+                    QTimer::singleShot(450, [rootPtr] {
+                        if (!rootPtr) {
+                            return;
+                        }
+                        detail::FocusSharedMediaList(rootPtr.data());
+                    });
                     return true;
                 }
             }
@@ -1005,7 +1117,125 @@ protected:
                 }
             }
         }
-                return QObject::eventFilter(obj, event);
+
+        if (key == Qt::Key_P
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *topBar = detail::FindTopBar(root)) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        topBar, "accessibilityShowSharedMediaPhotos",
+                        Qt::DirectConnection);
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+P -> TopBar.accessibilityShowSharedMediaPhotos"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+        }
+        if (key == Qt::Key_G
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *search = detail::FindDialogsSearch(root)) {
+                    focusAndAnnounce(search, QStringLiteral("Поиск чатов"));
+                    return true;
+                }
+            }
+            nvda::Speak(QStringLiteral("Поле поиска чатов не найдено"));
+            return true;
+        }
+        if (key == Qt::Key_E
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *topBar = detail::FindTopBar(root)) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        topBar, "accessibilityOpenChatSearch",
+                        Qt::DirectConnection);
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+E -> TopBar.accessibilityOpenChatSearch"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+            return true;
+        }
+        if (key == Qt::Key_M
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *history = detail::FindHistoryWidget(root)) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        history, "accessibilityOpenPinnedMessages",
+                        Qt::DirectConnection);
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+M -> HistoryWidget.accessibilityOpenPinnedMessages"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+            return true;
+        }
+        if (key == Qt::Key_Y
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *topBar = detail::FindTopBar(root)) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        topBar, "accessibilitySpeakChatStatus",
+                        Qt::DirectConnection);
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+Y -> TopBar.accessibilitySpeakChatStatus"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+            return true;
+        }
+        if (key == Qt::Key_K
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *history = detail::FindHistoryWidget(root)) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        history, "accessibilityToggleStickers",
+                        Qt::DirectConnection);
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+K -> HistoryWidget.accessibilityToggleStickers"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+            nvda::Speak(QStringLiteral(
+                "Откройте чат для панели стикеров"));
+            return true;
+        }
+        if (key == Qt::Key_C
+            && (mods & Qt::ControlModifier)
+            && (mods & Qt::ShiftModifier)) {
+            if (QWidget *root = detail::FindMainWindow()) {
+                if (QWidget *callBar = detail::FindGroupCallBar(root)) {
+                    if (callBar->isVisible()) {
+                        focusAndAnnounce(callBar, QStringLiteral("Групповой звонок"));
+                        return true;
+                    }
+                }
+                if (QWidget *topBar = detail::FindTopBar(root)) {
+                    const bool ok = QMetaObject::invokeMethod(
+                        topBar, "accessibilityJoinGroupCall",
+                        Qt::DirectConnection);
+                    LogLine(QStringLiteral(
+                        "Ctrl+Shift+C -> TopBar.accessibilityJoinGroupCall"
+                        " invoked=%1").arg(ok ? 1 : 0));
+                    return true;
+                }
+            }
+            nvda::Speak(QStringLiteral("Групповой звонок недоступен"));
+            return true;
+        }
+
+        return QObject::eventFilter(obj, event);
     }
 
 private:
@@ -1088,6 +1318,35 @@ private:
             if (QWidget *input = detail::FindByType(
                     history, "Ui::InputField")) {
                 out.append({ input, QStringLiteral("Поле ввода") });
+            }
+        }
+
+
+        if (QWidget *media = detail::FindSharedMediaList(root)) {
+            if (media->isVisible()) {
+                const auto mediaName = media->accessibleName().simplified();
+                out.append({ media,
+                    mediaName.isEmpty()
+                        ? QStringLiteral("Медиа чата")
+                        : mediaName });
+            }
+        }
+
+        if (QWidget *profile = detail::FindProfileInner(root)) {
+            if (profile->isVisible()) {
+                out.append({ profile, QStringLiteral("Профиль чата") });
+            }
+        }
+
+        if (QWidget *callBar = detail::FindGroupCallBar(root)) {
+            if (callBar->isVisible()) {
+                out.append({ callBar, QStringLiteral("Групповой звонок") });
+            }
+        }
+
+        if (QWidget *search = detail::FindDialogsSearch(root)) {
+            if (search->isVisible()) {
+                out.append({ search, QStringLiteral("Поиск чатов") });
             }
         }
 

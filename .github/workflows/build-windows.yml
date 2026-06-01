@@ -2219,6 +2219,7 @@ jobs:
                   '\tQAccessible::Role accessibilityChildRole() const override;\n'
                   '\tQRect accessibilityChildRect(int index) const override;\n'
                   '\tbool a11yProcessKey(QKeyEvent *e);\n'
+                  '\tQ_INVOKABLE void a11yAnnounceCurrentRow();\n'
                   '\tQ_INVOKABLE void a11yActivateFocused();\n')
 
               h, n = re.subn(
@@ -2419,7 +2420,7 @@ jobs:
               '\t\ta11yScrollToIndex(next);\n'
               '\t\tconst auto label = accessibilityChildName(next);\n'
               '\t\tif (!label.isEmpty()) {\n'
-              '\t\t\tTgAccessibility::nvda::SpeakForced(label, 0);\n'
+              '\t\t\ta11yAnnounceCurrentRow();\n'
               '\t\t}\n'
               '\t}\n'
               '\treturn true;\n'
@@ -2448,6 +2449,28 @@ jobs:
               '\t}\n'
               '}\n'
               '\n'
+              '\n'
+              'void ListWidget::a11yAnnounceCurrentRow() {\n'
+              '\ta11yRecomputeItems();\n'
+              '\tconst int total = int(_a11yFlatItems.size());\n'
+              '\tif (total <= 0) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tif (_a11yCurrentIndex < 0 || _a11yCurrentIndex >= total) {\n'
+              '\t\t_a11yCurrentIndex = 0;\n'
+              '\t}\n'
+              '\tconst auto label = accessibilityChildName(_a11yCurrentIndex);\n'
+              '\tif (label.isEmpty()) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\taccessibilityChildFocused(_a11yCurrentIndex);\n'
+              '\tsetAccessibleName(label);\n'
+              '\tQAccessibleEvent nameChanged(this, QAccessible::NameChanged);\n'
+              '\tQAccessible::updateAccessibility(&nameChanged);\n'
+              '\tQAccessibleEvent focusEv(this, QAccessible::Focus);\n'
+              '\tQAccessible::updateAccessibility(&focusEv);\n'
+              '\tTgAccessibility::nvda::SpeakForced(label, 0);\n'
+              '}\n'
               'void ListWidget::keyPressEvent(QKeyEvent *e) {\n'
               '\tif (a11yProcessKey(e)) {\n'
               '\t\treturn;\n'
@@ -2468,6 +2491,76 @@ jobs:
           with open(cpp_path, 'w', encoding='utf-8') as f:
               f.write(cpp)
           print('info_media_list_widget.cpp patched (media list a11y)')
+
+
+      # 7n-b. Forward arrow keys from InnerWidget to ListWidget (NVDA).
+      - name: Patch Info Media InnerWidget for list arrow forwarding
+        shell: python
+        run: |
+          import os, re
+
+          h_path = ('tdesktop/Telegram/SourceFiles/info/media/'
+                    'info_media_inner_widget.h')
+          cpp_path = ('tdesktop/Telegram/SourceFiles/info/media/'
+                      'info_media_inner_widget.cpp')
+
+          for p in (h_path, cpp_path):
+              if not os.path.exists(p):
+                  print(f'WARNING: missing {p} — skip inner media a11y')
+                  exit(0)
+
+          with open(h_path, 'r', encoding='utf-8') as f:
+              h = f.read()
+
+          if 'keyPressEvent' not in h:
+              h, n = re.subn(
+                  r'(protected:\s*\n)',
+                  r'\1\tvoid keyPressEvent(QKeyEvent *e) override;\n\n',
+                  h,
+                  count=1)
+              if n == 0:
+                  print('ERROR: InnerWidget protected: section not found')
+                  exit(1)
+              with open(h_path, 'w', encoding='utf-8') as f:
+                  f.write(h)
+              print('info_media_inner_widget.h: keyPressEvent declared')
+
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp = f.read()
+
+          if 'InnerWidget::keyPressEvent' in cpp:
+              print('info_media_inner_widget.cpp already forwards keys')
+              exit(0)
+
+          if '#include <QKeyEvent>' not in cpp:
+              cpp, n = re.subn(
+                  r'(#include\s+"info/media/info_media_inner_widget\.h"\s*\n)',
+                  lambda m: m.group(1) + '#include <QKeyEvent>\n',
+                  cpp,
+                  count=1)
+              if n == 0:
+                  print('ERROR: inner_widget include landmark not found')
+                  exit(1)
+
+          impl = (
+              '\n'
+              'void InnerWidget::keyPressEvent(QKeyEvent *e) {\n'
+              '\tif (_list && _list->a11yProcessKey(e)) {\n'
+              '\t\treturn;\n'
+              '\t}\n'
+              '\tRpWidget::keyPressEvent(e);\n'
+              '}\n'
+          )
+
+          anchor = '\n} // namespace Media\n} // namespace Info'
+          if anchor not in cpp:
+              print('ERROR: Info::Media namespace close not found in inner_widget')
+              exit(1)
+          cpp = cpp.replace(anchor, impl + anchor, 1)
+
+          with open(cpp_path, 'w', encoding='utf-8') as f:
+              f.write(cpp)
+          print('info_media_inner_widget.cpp: arrow keys forwarded to ListWidget')
 
       - name: Patch TopBar for shared links shortcut
         shell: python
@@ -2575,6 +2668,15 @@ jobs:
               f.write(cpp)
           print('top_bar_widget.cpp: links shortcut added')
       # ============================================
+      # 7o. Photos, search, pinned, status, stickers, group calls.
+      # ============================================
+      - name: Apply extended accessibility upstream patches
+        shell: bash
+        run: python accessibility-patch/scripts/workflow_patch_extended.py
+        env:
+          REPO_NAME: tdesktop
+
+      # ============================================
       # 8. Cache third-party libraries
       # ============================================
       - name: Generate cache key
@@ -2582,10 +2684,12 @@ jobs:
         run: |
           PREPARE_FILE="$REPO_NAME/Telegram/build/prepare/prepare.py"
           if [ -f "$PREPARE_FILE" ]; then
-            echo "CACHE_KEY=$(sha256sum $PREPARE_FILE | awk '{ print $1 }')" >> $GITHUB_ENV
+            BASE_KEY=$(sha256sum $PREPARE_FILE | awk '{ print $1 }')
           else
-            echo "CACHE_KEY=no-prepare-file" >> $GITHUB_ENV
+            BASE_KEY=no-prepare-file
           fi
+          A11Y_HASH=$(sha256sum accessibility-patch/accessibility/* accessibility-patch/.github/workflows/build-windows.yml 2>/dev/null | sha256sum | awk '{ print $1 }')
+          echo "CACHE_KEY=${BASE_KEY}-a11y-${A11Y_HASH}" >> $GITHUB_ENV
 
       - name: Restore libraries cache
         id: cache-libs
@@ -2678,7 +2782,7 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           variant: sccache
-          max-size: 2G
+          max-size: 4G
           key: tdesktop-msvc-${{ env.CACHE_KEY }}
           restore-keys: |
             tdesktop-msvc-
@@ -2834,6 +2938,14 @@ jobs:
           echo "Bundled $DLL -> artifact/nvdaControllerClient.dll"
           echo "Size: $(du -h artifact/nvdaControllerClient.dll | cut -f1)"
 
+      - name: Write accessible version file
+        shell: bash
+        run: |
+          REF="${GITHUB_REF_NAME:-dev}"
+          echo "Telegram Desktop Accessible ${REF}" > artifact/version.txt
+          echo "tdesktop=${{ env.TDESKTOP_VERSION }}" >> artifact/version.txt
+          echo "updates=${{ github.server_url }}/${{ github.repository }}/releases/latest" >> artifact/version.txt
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -2850,6 +2962,18 @@ jobs:
         shell: cmd
         run: choco install -y --no-progress innosetup
 
+      # git describe (v6.8.4-15-g9caf32dffc) is invalid for Inno
+      # VersionInfoVersion — must be four numeric components.
+      - name: Prepare Inno Setup version
+        shell: bash
+        run: |
+          ver="${TDESKTOP_VERSION#v}"
+          IFS='.-' read -r major minor patch build rest <<< "$ver"
+          build="${build:-0}"
+          if ! [[ "$build" =~ ^[0-9]+$ ]]; then build=0; fi
+          echo "INNO_VERSION=${major}.${minor}.${patch}.${build}" >> "$GITHUB_ENV"
+          echo "Inno VersionInfoVersion=${major}.${minor}.${patch}.${build}"
+
       - name: Build installer
         shell: cmd
         run: |
@@ -2858,6 +2982,8 @@ jobs:
           echo AppName=Telegram Desktop Accessible >> setup.iss
           echo AppId={{8A0B3A11-54B6-4D53-9C74-4D0B5E54A11A} >> setup.iss
           echo AppVersion=${{ env.TDESKTOP_VERSION }}-accessible >> setup.iss
+          echo VersionInfoVersion=${{ env.INNO_VERSION }} >> setup.iss
+          echo VersionInfoTextVersion=Telegram Accessible >> setup.iss
           echo AppPublisher=tdesktop-accessible >> setup.iss
           echo AppPublisherURL=https://github.com/Nikita34196/tdesktop-accessible >> setup.iss
           echo AppUpdatesURL=https://github.com/Nikita34196/tdesktop-accessible/releases/latest >> setup.iss
@@ -2890,6 +3016,7 @@ jobs:
           echo Filename: "{app}\Telegram.exe"; Description: "Запустить Telegram Accessible"; Flags: nowait postinstall skipifsilent >> setup.iss
           type setup.iss
           "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+          if errorlevel 1 exit /b 1
           dir installer
 
       - name: Upload installer artifact

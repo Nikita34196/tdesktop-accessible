@@ -2962,6 +2962,18 @@ jobs:
         shell: cmd
         run: choco install -y --no-progress innosetup
 
+      # git describe (v6.8.4-15-g9caf32dffc) is invalid for Inno
+      # VersionInfoVersion — must be four numeric components.
+      - name: Prepare Inno Setup version
+        shell: bash
+        run: |
+          ver="${TDESKTOP_VERSION#v}"
+          IFS='.-' read -r major minor patch build rest <<< "$ver"
+          build="${build:-0}"
+          if ! [[ "$build" =~ ^[0-9]+$ ]]; then build=0; fi
+          echo "INNO_VERSION=${major}.${minor}.${patch}.${build}" >> "$GITHUB_ENV"
+          echo "Inno VersionInfoVersion=${major}.${minor}.${patch}.${build}"
+
       - name: Build installer
         shell: cmd
         run: |
@@ -2970,7 +2982,7 @@ jobs:
           echo AppName=Telegram Desktop Accessible >> setup.iss
           echo AppId={{8A0B3A11-54B6-4D53-9C74-4D0B5E54A11A} >> setup.iss
           echo AppVersion=${{ env.TDESKTOP_VERSION }}-accessible >> setup.iss
-          echo VersionInfoVersion=${{ env.TDESKTOP_VERSION }} >> setup.iss
+          echo VersionInfoVersion=${{ env.INNO_VERSION }} >> setup.iss
           echo VersionInfoTextVersion=Telegram Accessible >> setup.iss
           echo AppPublisher=tdesktop-accessible >> setup.iss
           echo AppPublisherURL=https://github.com/Nikita34196/tdesktop-accessible >> setup.iss
@@ -3004,6 +3016,7 @@ jobs:
           echo Filename: "{app}\Telegram.exe"; Description: "Запустить Telegram Accessible"; Flags: nowait postinstall skipifsilent >> setup.iss
           type setup.iss
           "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+          if errorlevel 1 exit /b 1
           dir installer
 
       - name: Upload installer artifact

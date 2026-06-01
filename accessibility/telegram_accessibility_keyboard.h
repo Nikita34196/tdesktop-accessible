@@ -635,6 +635,61 @@ inline bool IsSharedMediaListPanel(QWidget *w) {
     return w && DynamicTypeName(w) == QLatin1String("Info::Media::ListWidget");
 }
 
+
+inline bool IsSharedMediaInnerPanel(QWidget *w) {
+    return w && DynamicTypeName(w) == QLatin1String("Info::Media::InnerWidget");
+}
+
+// Shared-media panel: focus often sits on InnerWidget while arrow
+// handling and NVDA speech live on ListWidget (workflow patch 7n).
+inline QWidget *FindSharedMediaListWidget(QWidget *from) {
+    if (!from) {
+        return nullptr;
+    }
+    if (IsSharedMediaListPanel(from)) {
+        return from;
+    }
+    for (QWidget *w = from; w; w = w->parentWidget()) {
+        if (QWidget *list = FindByType(w, "Info::Media::ListWidget")) {
+            return list;
+        }
+        if (QWidget *list = FindByTypeAny(w, "Info::Media::ListWidget")) {
+            return list;
+        }
+    }
+    if (QWidget *root = from->window()) {
+        return FindByTypeAny(root, "Info::Media::ListWidget");
+    }
+    return nullptr;
+}
+
+inline void AnnounceSharedMediaListRow(QWidget *list) {
+    if (!list) {
+        return;
+    }
+    QMetaObject::invokeMethod(
+        list,
+        "a11yAnnounceCurrentRow",
+        Qt::DirectConnection);
+}
+
+inline void FocusSharedMediaList(QWidget *root) {
+    QWidget *list = FindSharedMediaListWidget(root);
+    if (!list) {
+        list = FindByTypeAny(root, "Info::Media::ListWidget");
+    }
+    if (!list) {
+        return;
+    }
+    if (list->focusPolicy() == Qt::NoFocus) {
+        list->setFocusPolicy(Qt::StrongFocus);
+    }
+    list->setFocus(Qt::ShortcutFocusReason);
+    QAccessibleEvent focusEv(list, QAccessible::Focus);
+    QAccessible::updateAccessibility(&focusEv);
+    AnnounceSharedMediaListRow(list);
+}
+
 inline QWidget *FindTopBar(QWidget *root) {
     if (!root) return nullptr;
     if (QWidget *history = FindByType(root, "HistoryWidget")) {
@@ -864,7 +919,8 @@ protected:
                 const auto type = detail::DynamicTypeName(focused);
                 if (detail::IsChatListPanel(focused)
                     || detail::IsMessageListPanel(focused)
-                    || detail::IsSharedMediaListPanel(focused)) {
+                    || detail::IsSharedMediaListPanel(focused)
+                    || detail::IsSharedMediaInnerPanel(focused)) {
                     // Let the keypress run normally first, then read state.
                     QPointer<QWidget> alive(focused);
                     const QString keyName = (key == Qt::Key_Up) ? "Up"
@@ -916,6 +972,19 @@ protected:
                         }
                         LogLine(summary);
                     });
+                    // Files panel: focus is often on InnerWidget, not
+                    // ListWidget — patch 7n keyPressEvent may not run.
+                    if (detail::IsSharedMediaInnerPanel(focused)) {
+                        QPointer<QWidget> inner(focused);
+                        QTimer::singleShot(80, [inner] {
+                            if (!inner) {
+                                return;
+                            }
+                            detail::AnnounceSharedMediaListRow(
+                                detail::FindSharedMediaListWidget(
+                                    inner.data()));
+                        });
+                    }
                 }
             }
         }
@@ -986,6 +1055,13 @@ protected:
                     LogLine(QStringLiteral(
                         "Ctrl+Shift+F -> TopBar.accessibilityShowSharedMediaFiles"
                         " invoked=%1").arg(ok ? 1 : 0));
+                    QPointer<QWidget> rootPtr(root);
+                    QTimer::singleShot(450, [rootPtr] {
+                        if (!rootPtr) {
+                            return;
+                        }
+                        detail::FocusSharedMediaList(rootPtr.data());
+                    });
                     return true;
                 }
             }

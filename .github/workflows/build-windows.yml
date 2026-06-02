@@ -1172,9 +1172,9 @@ jobs:
       # sender-name link at the top), and fires it through the same
       # ActivateClickHandler path a real mouse click uses.
       #
-      # This is "phase 1" — it reliably opens single-content messages.
-      # Multi-link messages still fall back to the Shift+F10 context
-      # menu; full Tab-through-every-clickable navigation is phase 2.
+      # Phase 1: Enter opens attachments; Tab starts link navigation.
+      # Phase 2 (scripts/patch_history_phase2_tab.py): all clickables,
+      # inline keyboard buttons, structural targets, top-to-bottom order.
       # ============================================
       - name: Patch HistoryInner for Enter-to-activate
         shell: python
@@ -1648,6 +1648,10 @@ jobs:
           with open(cpp_path, 'w', encoding='utf-8') as f:
               f.write(cpp)
           print('history_inner_widget.cpp patched (Enter-activate)')
+
+      - name: Patch HistoryInner phase 2 Tab clickables
+        shell: python
+        run: python3 scripts/patch_history_phase2_tab.py
 
       # ============================================
       # 7h. Rich message labels for arrow-key navigation.

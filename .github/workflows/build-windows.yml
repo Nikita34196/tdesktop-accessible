@@ -1650,8 +1650,8 @@ jobs:
           print('history_inner_widget.cpp patched (Enter-activate)')
 
       - name: Patch HistoryInner phase 2 Tab clickables
-        shell: python
-        run: python3 scripts/patch_history_phase2_tab.py
+        shell: bash
+        run: python accessibility-patch/scripts/patch_history_phase2_tab.py
 
       # ============================================
       # 7h. Rich message labels for arrow-key navigation.

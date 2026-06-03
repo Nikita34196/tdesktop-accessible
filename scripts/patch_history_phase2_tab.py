@@ -8,6 +8,7 @@ import sys
 
 ROOT = os.environ.get('TDESKTOP_ROOT', 'tdesktop')
 MARKER = 'a11y-phase2-clickables'
+VOICE_SAFE_MARKER = 'a11y-phase2-voice-tab-safe'
 BLOCK_START_RE = re.compile(
     r'^\s*// === Enter/link a11y navigation \(added by accessibility-patch\) ===',
     re.MULTILINE,
@@ -18,24 +19,40 @@ CPP_PATH = f'{ROOT}/Telegram/SourceFiles/history/history_inner_widget.cpp'
 
 
 def patch_header(src: str) -> str:
-    if 'a11yAppendStructuralClickables' in src:
-        return src
     if 'a11yCollectFocusedLinks' not in src:
         print('ERROR: patch Enter/link step before phase 2')
         sys.exit(1)
-    src, n = re.subn(
-        r'(std::vector<ClickHandlerPtr>\s+a11yCollectFocusedLinks\s*\(\s*\)\s*;)',
-        lambda m: m.group(1)
-        + '\n\tvoid a11yAppendStructuralClickables('
-        + '\n\t\tnot_null<HistoryView::Element*> view,'
-        + '\n\t\tnot_null<HistoryItem*> item);'
-        + '\n\tvoid a11ySortFocusedLinksByPosition();',
-        src,
-        count=1,
-    )
-    if n == 0:
-        print('ERROR: a11yCollectFocusedLinks declaration not found in .h')
-        sys.exit(1)
+
+    changed = False
+    if 'a11yIsPlaybackDocumentMessage' not in src:
+        src, n = re.subn(
+            r'(std::vector<ClickHandlerPtr>\s+a11yCollectFocusedLinks\s*\(\s*\)\s*;)',
+            lambda m: m.group(1)
+            + '\n\t[[nodiscard]] bool a11yIsPlaybackDocumentMessage('
+            + '\n\t\tnot_null<HistoryItem*> item) const;',
+            src,
+            count=1,
+        )
+        if n == 0:
+            print('ERROR: a11yCollectFocusedLinks declaration not found in .h')
+            sys.exit(1)
+        changed = True
+    if 'a11yAppendStructuralClickables' not in src:
+        src, n = re.subn(
+            r'(std::vector<ClickHandlerPtr>\s+a11yCollectFocusedLinks\s*\(\s*\)\s*;'
+            r'(?:\s*\n\t\[\[nodiscard\]\]\s+bool\s+a11yIsPlaybackDocumentMessage\s*\([^;]+;\s*)?)',
+            lambda m: m.group(0)
+            + '\n\tvoid a11yAppendStructuralClickables('
+            + '\n\t\tnot_null<HistoryView::Element*> view,'
+            + '\n\t\tnot_null<HistoryItem*> item);'
+            + '\n\tvoid a11ySortFocusedLinksByPosition();',
+            src,
+            count=1,
+        )
+        if n == 0:
+            print('ERROR: a11yCollectFocusedLinks declaration not found in .h')
+            sys.exit(1)
+        changed = True
     if '_a11yFocusedLinkSortY' not in src:
         src, n = re.subn(
             r'(std::vector<QString>\s+_a11yFocusedLinkLabels\s*;)',
@@ -46,6 +63,22 @@ def patch_header(src: str) -> str:
         if n == 0:
             print('ERROR: _a11yFocusedLinkLabels landmark not found in .h')
             sys.exit(1)
+        changed = True
+    if '_a11yFocusedLinksCacheValid' not in src:
+        src, n = re.subn(
+            r'(std::vector<int>\s+_a11yFocusedLinkSortY\s*;)',
+            lambda m: m.group(1)
+            + '\n\tbool _a11yFocusedLinksCacheValid = false;'
+            + '\n\tbool _a11yFocusedPlaybackOnly = false;',
+            src,
+            count=1,
+        )
+        if n == 0:
+            print('ERROR: _a11yFocusedLinkSortY landmark not found in .h')
+            sys.exit(1)
+        changed = True
+    if changed:
+        print('history_inner_widget.h patched (phase 2 clickables)')
     return src
 
 
@@ -54,6 +87,24 @@ def phase2_block() -> str:
 // === Enter/link a11y navigation (added by accessibility-patch) ===
 // a11y-phase2-clickables: Tab cycles every clickable in the focused message
 // (links, inline buttons, reply header, sender, media actions), top-to-bottom.
+// a11y-phase2-voice-tab-safe: no dense textState grid on voice/video — it
+// triggers seeking/repaint storms inside Document::textState.
+
+[[nodiscard]] bool HistoryInner::a11yIsPlaybackDocumentMessage(
+		not_null<HistoryItem*> item) const {
+	const auto media = item->media();
+	if (!media) {
+		return false;
+	}
+	const auto document = media->document();
+	if (!document) {
+		return false;
+	}
+	return document->isVoiceMessage()
+		|| document->isVideoMessage()
+		|| document->isSong()
+		|| document->isAudioFile();
+}
 
 void HistoryInner::a11ySortFocusedLinksByPosition() {
 	const auto n = int(_a11yFocusedLinks.size());
@@ -146,48 +197,67 @@ void HistoryInner::a11yAppendStructuralClickables(
 			}
 		}
 	}
-	if (const auto media = view->media()) {
-		const auto h = view->height();
-		const auto center = sortY(h / 2);
-		for (const auto frac : { 0.35, 0.5, 0.65 }) {
-			auto request = StateRequest();
-			const auto state = media->textState(
-				QPoint(width() / 2, int(h * frac)),
-				request);
-			if (state.link) {
-				auto label = state.customTooltipText.simplified();
-				if (label.isEmpty()) {
-					label = a11yFocusedMessageSummary();
+	// Probing media->textState on voice/video calls Document::setSeekingStart
+	// and repaint per sample — a dense Tab scan freezes or crashes Telegram.
+	if (!a11yIsPlaybackDocumentMessage(item)) {
+		if (const auto media = view->media()) {
+			const auto h = view->height();
+			const auto center = sortY(h / 2);
+			for (const auto frac : { 0.35, 0.5, 0.65 }) {
+				auto request = StateRequest();
+				const auto state = media->textState(
+					QPoint(width() / 2, int(h * frac)),
+					request);
+				if (state.link) {
+					auto label = state.customTooltipText.simplified();
+					if (label.isEmpty()) {
+						label = a11yFocusedMessageSummary();
+					}
+					addLink(state.link, label, center);
 				}
-				addLink(state.link, label, center);
 			}
 		}
 	}
 }
 
 std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {
-	_a11yFocusedLinks.clear();
-	_a11yFocusedLinkLabels.clear();
-	_a11yFocusedLinkSortY.clear();
 	if (!_accessibilityFocusedItem) {
 		_a11yFocusedLinkIndex = -1;
 		_a11yFocusedLinksItem = nullptr;
+		_a11yFocusedLinksCacheValid = false;
+		_a11yFocusedPlaybackOnly = false;
+		_a11yFocusedLinks.clear();
+		_a11yFocusedLinkLabels.clear();
+		_a11yFocusedLinkSortY.clear();
 		return _a11yFocusedLinks;
 	}
 	if (_a11yFocusedLinksItem != _accessibilityFocusedItem) {
 		_a11yFocusedLinksItem = _accessibilityFocusedItem;
 		_a11yFocusedLinkIndex = -1;
+		_a11yFocusedLinksCacheValid = false;
+		_a11yFocusedPlaybackOnly = false;
 	}
+	if (_a11yFocusedLinksCacheValid) {
+		return _a11yFocusedLinks;
+	}
+	_a11yFocusedLinks.clear();
+	_a11yFocusedLinkLabels.clear();
+	_a11yFocusedLinkSortY.clear();
+	_a11yFocusedPlaybackOnly = false;
 	const auto view = viewByItem(_accessibilityFocusedItem);
 	if (!view) {
 		_a11yFocusedLinkIndex = -1;
+		_a11yFocusedLinksCacheValid = true;
 		return _a11yFocusedLinks;
 	}
 	const auto top = itemTop(view);
 	if (top < 0) {
 		_a11yFocusedLinkIndex = -1;
+		_a11yFocusedLinksCacheValid = true;
 		return _a11yFocusedLinks;
 	}
+	const auto item = _accessibilityFocusedItem;
+	const auto playbackMedia = a11yIsPlaybackDocumentMessage(item);
 	auto request = StateRequest();
 	const auto messageSummary = a11yFocusedMessageSummary();
 	const auto labelFromState = [&](const TextState &state) {
@@ -221,17 +291,28 @@ std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {
 		add(state, widgetPoint.y());
 	};
 	const auto itemHeight = view->height();
-	const auto stepY = std::max(6, itemHeight / 16);
-	const auto stepX = std::max(12, width() / 12);
-	for (auto y = top + 4; y < top + itemHeight; y += stepY) {
-		for (auto x = 4; x < width(); x += stepX) {
-			scan(QPoint(x, y));
+	if (!playbackMedia) {
+		const auto stepY = std::max(6, itemHeight / 16);
+		const auto stepX = std::max(12, width() / 12);
+		for (auto y = top + 4; y < top + itemHeight; y += stepY) {
+			for (auto x = 4; x < width(); x += stepX) {
+				scan(QPoint(x, y));
+			}
+		}
+		for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {
+			scan(QPoint(width() / 2, top + int(itemHeight * frac)));
+		}
+		// Dense bottom band (reactions, inline keyboard, comments).
+		{
+			const auto bottomTop = top + (itemHeight * 2 / 3);
+			for (auto y = bottomTop; y < top + itemHeight; y += 4) {
+				for (auto x = 4; x < width(); x += 8) {
+					scan(QPoint(x, y));
+				}
+			}
 		}
 	}
-	for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {
-		scan(QPoint(width() / 2, top + int(itemHeight * frac)));
-	}
-	// Dense top band (forward header, reply, sender links).
+	// Header band only (safe for forwards/reply above a voice bubble).
 	{
 		const auto headerBottom = top + std::min(itemHeight / 3, 72);
 		const auto headerStepY = 4;
@@ -245,20 +326,15 @@ std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {
 			scan(QPoint(width() / 2, top + int(itemHeight * frac)));
 		}
 	}
-	// Dense bottom band (reactions, inline keyboard, comments).
-	{
-		const auto bottomTop = top + (itemHeight * 2 / 3);
-		for (auto y = bottomTop; y < top + itemHeight; y += 4) {
-			for (auto x = 4; x < width(); x += 8) {
-				scan(QPoint(x, y));
-			}
-		}
-	}
-	a11yAppendStructuralClickables(view, _accessibilityFocusedItem);
+	a11yAppendStructuralClickables(view, item);
 	a11ySortFocusedLinksByPosition();
+	if (_a11yFocusedLinks.empty() && playbackMedia) {
+		_a11yFocusedPlaybackOnly = true;
+	}
 	if (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {
 		_a11yFocusedLinkIndex = -1;
 	}
+	_a11yFocusedLinksCacheValid = true;
 	return _a11yFocusedLinks;
 }
 
@@ -352,6 +428,15 @@ QString HistoryInner::a11yFocusedMessageSummary() const {
 
 void HistoryInner::a11yMoveFocusedLink(int delta) {
 	const auto links = a11yCollectFocusedLinks();
+	if (_a11yFocusedPlaybackOnly) {
+		_a11yFocusedLinkIndex = 0;
+		const auto label = QStringLiteral(
+			"Вложение 1 из 1: голосовое или аудио, Enter — воспроизведение");
+		TgAccessibility::nvda::SpeakForced(label);
+		TgAccessibility::LogLine(
+			QStringLiteral("[messages] focused playback-only message"));
+		return;
+	}
 	const auto total = int(links.size());
 	if (total <= 0) {
 		TgAccessibility::nvda::SpeakForced(
@@ -386,6 +471,12 @@ void HistoryInner::a11yMoveFocusedLink(int delta) {
 }
 
 bool HistoryInner::a11yActivateFocusedLink() {
+	if (_a11yFocusedPlaybackOnly) {
+		TgAccessibility::LogLine(
+			QStringLiteral("[messages] activate playback-only by Enter"));
+		playPauseFocusedMedia();
+		return true;
+	}
 	const auto links = a11yCollectFocusedLinks();
 	if (_a11yFocusedLinkIndex < 0
 			|| _a11yFocusedLinkIndex >= int(links.size())) {
@@ -472,8 +563,8 @@ void HistoryInner::a11yActivateFocused() {
 
 
 def patch_cpp(src: str) -> str:
-    if MARKER in src:
-        print('history_inner_widget.cpp already has phase 2 clickables')
+    if VOICE_SAFE_MARKER in src:
+        print('history_inner_widget.cpp already has phase 2 voice-tab fix')
         return src
     if 'a11yCollectFocusedLinks' not in src:
         print('WARNING: a11yCollectFocusedLinks missing — run Enter/link patch first')
@@ -488,6 +579,10 @@ def patch_cpp(src: str) -> str:
     # Phase-1 patch always appends this block at EOF; drop through end so we
     # never leave duplicate a11y* definitions (CI yaml-indented phase-1 body).
     new_src = src[:start].rstrip() + '\n\n' + phase2_block().strip() + '\n'
+    if MARKER in src:
+        print('history_inner_widget.cpp upgraded (phase 2 voice-tab fix)')
+    else:
+        print('history_inner_widget.cpp patched (phase 2 clickables)')
 
     if '#include <numeric>' not in new_src:
         new_src = new_src.replace(
@@ -527,8 +622,7 @@ def main() -> None:
     if cpp2 != cpp:
         with open(CPP_PATH, 'w', encoding='utf-8') as f:
             f.write(cpp2)
-        print('history_inner_widget.cpp patched (phase 2 clickables)')
-    elif MARKER not in cpp:
+    elif VOICE_SAFE_MARKER not in cpp:
         print('No phase 2 changes applied')
 
 

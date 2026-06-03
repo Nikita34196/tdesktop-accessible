@@ -10,6 +10,7 @@ Guidance for AI agents working in this repository.
 |------|---------|
 | `accessibility/` | `QAccessible` factory, names, keyboard navigation |
 | `scripts/a11y_upstream_patches.py` | Extra patches applied to a cloned `tdesktop` tree |
+| `scripts/patch_history_phase2_tab.py` | Phase 2 Tab: all clickables in a message (after Enter/link patch) |
 | `.github/workflows/build-windows.yml` | Full Windows MSVC build and release |
 
 There is **no** `package.json`, Docker dev stack, unit test suite, or dev server. Lint/build/run for the **runnable app** happen on Windows (CI or a Windows dev machine).

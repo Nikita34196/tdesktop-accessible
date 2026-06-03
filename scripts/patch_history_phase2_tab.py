@@ -8,7 +8,10 @@ import sys
 
 ROOT = os.environ.get('TDESKTOP_ROOT', 'tdesktop')
 MARKER = 'a11y-phase2-clickables'
-BLOCK_START = '// === Enter/link a11y navigation (added by accessibility-patch) ==='
+BLOCK_START_RE = re.compile(
+    r'^\s*// === Enter/link a11y navigation \(added by accessibility-patch\) ===',
+    re.MULTILINE,
+)
 
 H_PATH = f'{ROOT}/Telegram/SourceFiles/history/history_inner_widget.h'
 CPP_PATH = f'{ROOT}/Telegram/SourceFiles/history/history_inner_widget.cpp'
@@ -99,7 +102,7 @@ void HistoryInner::a11yAppendStructuralClickables(
 		_a11yFocusedLinkLabels.push_back(label.simplified());
 		_a11yFocusedLinkSortY.push_back(y);
 	};
-	if (const auto sender = view->fromLink()) {
+	if (const auto sender = view->fromPhotoLink()) {
 		addLink(sender, QStringLiteral("Отправитель"), sortY(8));
 	}
 	if (const auto via = item->Get<HistoryMessageVia>()) {
@@ -476,23 +479,15 @@ def patch_cpp(src: str) -> str:
         print('WARNING: a11yCollectFocusedLinks missing — run Enter/link patch first')
         return src
 
-    if BLOCK_START not in src:
+    start_match = BLOCK_START_RE.search(src)
+    if not start_match:
         print('ERROR: a11y navigation block not found in .cpp')
         sys.exit(1)
 
-    start = src.index(BLOCK_START)
-    rest = src[start:]
-    end_match = re.search(
-        r'\n\}(?:[ \t]*\n)+'
-        r'(?=(?:QString|bool|void|std::vector|int)\s+HistoryInner::)',
-        rest,
-    )
-    if end_match:
-        end = start + end_match.end()
-    else:
-        # Phase-1 block may be appended at EOF during CI before other symbols.
-        end = len(src)
-    new_src = src[:start] + phase2_block().strip() + '\n' + src[end:]
+    start = start_match.start()
+    # Phase-1 patch always appends this block at EOF; drop through end so we
+    # never leave duplicate a11y* definitions (CI yaml-indented phase-1 body).
+    new_src = src[:start].rstrip() + '\n\n' + phase2_block().strip() + '\n'
 
     if '#include <numeric>' not in new_src:
         new_src = new_src.replace(

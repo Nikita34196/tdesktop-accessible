@@ -1754,7 +1754,8 @@ jobs:
 
           changed = False
 
-          if 'a11yMessageSummaryForView' not in cpp:
+          if ('a11yMessageSummaryForView' not in cpp
+                  and 'a11y-phase2-clickables' not in cpp):
               cpp = cpp.rstrip() + '\n' + summary_fn
               changed = True
               print('history_inner_widget.cpp: appended a11yMessageSummaryForView')

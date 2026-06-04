@@ -8,7 +8,7 @@ import sys
 
 ROOT = os.environ.get('TDESKTOP_ROOT', 'tdesktop')
 MARKER = 'a11y-phase2-clickables'
-VOICE_SAFE_MARKER = 'a11y-phase2-voice-tab-safe'
+VOICE_SAFE_MARKER = 'a11y-phase2-voice-tab-safe-v2'
 BLOCK_START_RE = re.compile(
     r'^\s*// === Enter/link a11y navigation \(added by accessibility-patch\) ===',
     re.MULTILINE,
@@ -87,8 +87,8 @@ def phase2_block() -> str:
 // === Enter/link a11y navigation (added by accessibility-patch) ===
 // a11y-phase2-clickables: Tab cycles every clickable in the focused message
 // (links, inline buttons, reply header, sender, media actions), top-to-bottom.
-// a11y-phase2-voice-tab-safe: no dense textState grid on voice/video — it
-// triggers seeking/repaint storms inside Document::textState.
+// a11y-phase2-voice-tab-safe-v2: voice/video messages must not call
+// view->textState at all (even a "header" scan hits the waveform).
 
 [[nodiscard]] bool HistoryInner::a11yIsPlaybackDocumentMessage(
 		not_null<HistoryItem*> item) const {
@@ -258,6 +258,16 @@ std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {
 	}
 	const auto item = _accessibilityFocusedItem;
 	const auto playbackMedia = a11yIsPlaybackDocumentMessage(item);
+	if (playbackMedia) {
+		a11yAppendStructuralClickables(view, item);
+		_a11yFocusedPlaybackOnly = _a11yFocusedLinks.empty();
+		a11ySortFocusedLinksByPosition();
+		if (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {
+			_a11yFocusedLinkIndex = -1;
+		}
+		_a11yFocusedLinksCacheValid = true;
+		return _a11yFocusedLinks;
+	}
 	auto request = StateRequest();
 	const auto messageSummary = a11yFocusedMessageSummary();
 	const auto labelFromState = [&](const TextState &state) {
@@ -291,28 +301,26 @@ std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {
 		add(state, widgetPoint.y());
 	};
 	const auto itemHeight = view->height();
-	if (!playbackMedia) {
-		const auto stepY = std::max(6, itemHeight / 16);
-		const auto stepX = std::max(12, width() / 12);
-		for (auto y = top + 4; y < top + itemHeight; y += stepY) {
-			for (auto x = 4; x < width(); x += stepX) {
+	const auto stepY = std::max(6, itemHeight / 16);
+	const auto stepX = std::max(12, width() / 12);
+	for (auto y = top + 4; y < top + itemHeight; y += stepY) {
+		for (auto x = 4; x < width(); x += stepX) {
+			scan(QPoint(x, y));
+		}
+	}
+	for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {
+		scan(QPoint(width() / 2, top + int(itemHeight * frac)));
+	}
+	// Dense bottom band (reactions, inline keyboard, comments).
+	{
+		const auto bottomTop = top + (itemHeight * 2 / 3);
+		for (auto y = bottomTop; y < top + itemHeight; y += 4) {
+			for (auto x = 4; x < width(); x += 8) {
 				scan(QPoint(x, y));
 			}
 		}
-		for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {
-			scan(QPoint(width() / 2, top + int(itemHeight * frac)));
-		}
-		// Dense bottom band (reactions, inline keyboard, comments).
-		{
-			const auto bottomTop = top + (itemHeight * 2 / 3);
-			for (auto y = bottomTop; y < top + itemHeight; y += 4) {
-				for (auto x = 4; x < width(); x += 8) {
-					scan(QPoint(x, y));
-				}
-			}
-		}
 	}
-	// Header band only (safe for forwards/reply above a voice bubble).
+	// Header band (forward header, reply, sender links).
 	{
 		const auto headerBottom = top + std::min(itemHeight / 3, 72);
 		const auto headerStepY = 4;
@@ -328,9 +336,6 @@ std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {
 	}
 	a11yAppendStructuralClickables(view, item);
 	a11ySortFocusedLinksByPosition();
-	if (_a11yFocusedLinks.empty() && playbackMedia) {
-		_a11yFocusedPlaybackOnly = true;
-	}
 	if (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {
 		_a11yFocusedLinkIndex = -1;
 	}
@@ -427,6 +432,19 @@ QString HistoryInner::a11yFocusedMessageSummary() const {
 }
 
 void HistoryInner::a11yMoveFocusedLink(int delta) {
+	if (_accessibilityFocusedItem
+			&& a11yIsPlaybackDocumentMessage(_accessibilityFocusedItem)) {
+		a11yCollectFocusedLinks();
+		if (_a11yFocusedPlaybackOnly) {
+			_a11yFocusedLinkIndex = 0;
+			const auto label = QStringLiteral(
+				"Вложение 1 из 1: голосовое или аудио, Enter — воспроизведение");
+			TgAccessibility::nvda::SpeakForced(label);
+			TgAccessibility::LogLine(
+				QStringLiteral("[messages] Tab on playback message (no textState)"));
+			return;
+		}
+	}
 	const auto links = a11yCollectFocusedLinks();
 	if (_a11yFocusedPlaybackOnly) {
 		_a11yFocusedLinkIndex = 0;

@@ -1653,6 +1653,10 @@ jobs:
         shell: bash
         run: python accessibility-patch/scripts/patch_history_phase2_tab.py
 
+      - name: Patch Tab playback guard in HistoryInner
+        shell: bash
+        run: python accessibility-patch/scripts/patch_history_tab_voice_guard.py
+
       # ============================================
       # 7h. Rich message labels for arrow-key navigation.
       #     Step 7b may be skipped when upstream already ships

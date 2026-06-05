@@ -8,7 +8,7 @@ import sys
 
 ROOT = os.environ.get('TDESKTOP_ROOT', 'tdesktop')
 MARKER = 'a11y-phase2-clickables'
-VOICE_SAFE_MARKER = 'a11y-phase2-voice-tab-safe-v2'
+VOICE_SAFE_MARKER = 'a11y-phase2-voice-tab-safe-v3'
 BLOCK_START_RE = re.compile(
     r'^\s*// === Enter/link a11y navigation \(added by accessibility-patch\) ===',
     re.MULTILINE,
@@ -24,12 +24,15 @@ def patch_header(src: str) -> str:
         sys.exit(1)
 
     changed = False
-    if 'a11yIsPlaybackDocumentMessage' not in src:
+    if 'a11yShouldSkipTextStateTabScan' not in src:
         src, n = re.subn(
+            r'(\[\[nodiscard\]\]\s+bool\s+a11yIsPlaybackDocumentMessage\s*\([^;]+;\s*)?'
             r'(std::vector<ClickHandlerPtr>\s+a11yCollectFocusedLinks\s*\(\s*\)\s*;)',
-            lambda m: m.group(1)
-            + '\n\t[[nodiscard]] bool a11yIsPlaybackDocumentMessage('
-            + '\n\t\tnot_null<HistoryItem*> item) const;',
+            lambda m: (m.group(1) or '')
+            + m.group(2)
+            + '\n\t[[nodiscard]] bool a11yShouldSkipTextStateTabScan('
+            + '\n\t\tnot_null<HistoryItem*> item) const;'
+            + '\n\tvoid a11yTabOnPlaybackMessage();',
             src,
             count=1,
         )
@@ -37,6 +40,15 @@ def patch_header(src: str) -> str:
             print('ERROR: a11yCollectFocusedLinks declaration not found in .h')
             sys.exit(1)
         changed = True
+    elif 'a11yTabOnPlaybackMessage' not in src:
+        src, n = re.subn(
+            r'(\[\[nodiscard\]\]\s+bool\s+a11yShouldSkipTextStateTabScan\s*\([^;]+;\s*)',
+            lambda m: m.group(1) + '\tvoid a11yTabOnPlaybackMessage();\n',
+            src,
+            count=1,
+        )
+        if n:
+            changed = True
     if 'a11yAppendStructuralClickables' not in src:
         src, n = re.subn(
             r'(std::vector<ClickHandlerPtr>\s+a11yCollectFocusedLinks\s*\(\s*\)\s*;'
@@ -87,23 +99,56 @@ def phase2_block() -> str:
 // === Enter/link a11y navigation (added by accessibility-patch) ===
 // a11y-phase2-clickables: Tab cycles every clickable in the focused message
 // (links, inline buttons, reply header, sender, media actions), top-to-bottom.
-// a11y-phase2-voice-tab-safe-v2: voice/video messages must not call
-// view->textState at all (even a "header" scan hits the waveform).
+// a11y-phase2-voice-tab-safe-v3: Tab on voice must never call textState.
 
-[[nodiscard]] bool HistoryInner::a11yIsPlaybackDocumentMessage(
+[[nodiscard]] bool HistoryInner::a11yShouldSkipTextStateTabScan(
 		not_null<HistoryItem*> item) const {
-	const auto media = item->media();
-	if (!media) {
-		return false;
+	const auto checkDocument = [](DocumentData *document) {
+		if (!document) {
+			return false;
+		}
+		return document->isVoiceMessage()
+			|| document->isVideoMessage()
+			|| document->isSong()
+			|| document->isAudioFile();
+	};
+	if (const auto media = item->media()) {
+		if (checkDocument(media->document())) {
+			return true;
+		}
 	}
-	const auto document = media->document();
-	if (!document) {
-		return false;
+	if (const auto view = viewByItem(item)) {
+		if (const auto media = view->media()) {
+			if (checkDocument(media->document())) {
+				return true;
+			}
+		}
+		for (const auto subItem : HistoryView::ActiveMessageSubItems(
+				view,
+				_history)) {
+			if (subItem == HistoryView::MessageSubItem::Played) {
+				if (const auto media = item->media()) {
+					if (checkDocument(media->document())) {
+						return true;
+					}
+				}
+			}
+		}
 	}
-	return document->isVoiceMessage()
-		|| document->isVideoMessage()
-		|| document->isSong()
-		|| document->isAudioFile();
+	return false;
+}
+
+void HistoryInner::a11yTabOnPlaybackMessage() {
+	_a11yFocusedLinks.clear();
+	_a11yFocusedLinkLabels.clear();
+	_a11yFocusedLinkSortY.clear();
+	_a11yFocusedPlaybackOnly = true;
+	_a11yFocusedLinksCacheValid = true;
+	_a11yFocusedLinkIndex = 0;
+	TgAccessibility::nvda::SpeakForced(QStringLiteral(
+		"Вложение 1 из 1: голосовое или аудио, Enter — воспроизведение"));
+	TgAccessibility::LogLine(
+		QStringLiteral("[messages] Tab on playback (guarded, no textState)"));
 }
 
 void HistoryInner::a11ySortFocusedLinksByPosition() {
@@ -199,7 +244,7 @@ void HistoryInner::a11yAppendStructuralClickables(
 	}
 	// Probing media->textState on voice/video calls Document::setSeekingStart
 	// and repaint per sample — a dense Tab scan freezes or crashes Telegram.
-	if (!a11yIsPlaybackDocumentMessage(item)) {
+	if (!a11yShouldSkipTextStateTabScan(item)) {
 		if (const auto media = view->media()) {
 			const auto h = view->height();
 			const auto center = sortY(h / 2);
@@ -257,14 +302,8 @@ std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {
 		return _a11yFocusedLinks;
 	}
 	const auto item = _accessibilityFocusedItem;
-	const auto playbackMedia = a11yIsPlaybackDocumentMessage(item);
-	if (playbackMedia) {
-		a11yAppendStructuralClickables(view, item);
-		_a11yFocusedPlaybackOnly = _a11yFocusedLinks.empty();
-		a11ySortFocusedLinksByPosition();
-		if (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {
-			_a11yFocusedLinkIndex = -1;
-		}
+	if (a11yShouldSkipTextStateTabScan(item)) {
+		_a11yFocusedPlaybackOnly = true;
 		_a11yFocusedLinksCacheValid = true;
 		return _a11yFocusedLinks;
 	}
@@ -433,26 +472,13 @@ QString HistoryInner::a11yFocusedMessageSummary() const {
 
 void HistoryInner::a11yMoveFocusedLink(int delta) {
 	if (_accessibilityFocusedItem
-			&& a11yIsPlaybackDocumentMessage(_accessibilityFocusedItem)) {
-		a11yCollectFocusedLinks();
-		if (_a11yFocusedPlaybackOnly) {
-			_a11yFocusedLinkIndex = 0;
-			const auto label = QStringLiteral(
-				"Вложение 1 из 1: голосовое или аудио, Enter — воспроизведение");
-			TgAccessibility::nvda::SpeakForced(label);
-			TgAccessibility::LogLine(
-				QStringLiteral("[messages] Tab on playback message (no textState)"));
-			return;
-		}
+			&& a11yShouldSkipTextStateTabScan(_accessibilityFocusedItem)) {
+		a11yTabOnPlaybackMessage();
+		return;
 	}
 	const auto links = a11yCollectFocusedLinks();
 	if (_a11yFocusedPlaybackOnly) {
-		_a11yFocusedLinkIndex = 0;
-		const auto label = QStringLiteral(
-			"Вложение 1 из 1: голосовое или аудио, Enter — воспроизведение");
-		TgAccessibility::nvda::SpeakForced(label);
-		TgAccessibility::LogLine(
-			QStringLiteral("[messages] focused playback-only message"));
+		a11yTabOnPlaybackMessage();
 		return;
 	}
 	const auto total = int(links.size());

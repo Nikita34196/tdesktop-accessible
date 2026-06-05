@@ -8,7 +8,7 @@ import sys
 
 ROOT = os.environ.get('TDESKTOP_ROOT', 'tdesktop')
 MARKER = 'a11y-phase2-clickables'
-VOICE_SAFE_MARKER = 'a11y-phase2-voice-tab-safe-v3'
+VOICE_SAFE_MARKER = 'a11y-phase2-voice-tab-safe-v3.1'
 BLOCK_START_RE = re.compile(
     r'^\s*// === Enter/link a11y navigation \(added by accessibility-patch\) ===',
     re.MULTILINE,
@@ -99,7 +99,7 @@ def phase2_block() -> str:
 // === Enter/link a11y navigation (added by accessibility-patch) ===
 // a11y-phase2-clickables: Tab cycles every clickable in the focused message
 // (links, inline buttons, reply header, sender, media actions), top-to-bottom.
-// a11y-phase2-voice-tab-safe-v3: Tab on voice must never call textState.
+// a11y-phase2-voice-tab-safe-v3.1: Tab on voice must never call textState.
 
 [[nodiscard]] bool HistoryInner::a11yShouldSkipTextStateTabScan(
 		not_null<HistoryItem*> item) const {
@@ -119,7 +119,7 @@ def phase2_block() -> str:
 	}
 	if (const auto view = viewByItem(item)) {
 		if (const auto media = view->media()) {
-			if (checkDocument(media->document())) {
+			if (checkDocument(media->getDocument())) {
 				return true;
 			}
 		}

@@ -10,6 +10,7 @@ ROOT = os.environ.get('TDESKTOP_ROOT', 'tdesktop')
 MARKER = 'a11y-phase2-clickables'
 VOICE_SAFE_MARKER = 'a11y-phase2-voice-tab-safe-v3.1'
 FORWARD_REACTION_MARKER = 'a11y-forward-reaction-structural-v1'
+TAB_SAFE_MARKER = 'a11y-tab-safe-no-dense-scan-v1'
 BLOCK_START_RE = re.compile(
     r'^\s*// === Enter/link a11y navigation \(added by accessibility-patch\) ===',
     re.MULTILINE,
@@ -102,6 +103,7 @@ def phase2_block() -> str:
 // (links, inline buttons, reply header, sender, media actions), top-to-bottom.
 // a11y-phase2-voice-tab-safe-v3.1: Tab on voice must never call textState.
 // a11y-forward-reaction-structural-v1: Tab targets for forwards and reactions.
+// a11y-tab-safe-no-dense-scan-v1: no full-message textState grid on Tab.
 
 [[nodiscard]] bool HistoryInner::a11yShouldSkipTextStateTabScan(
 		not_null<HistoryItem*> item) const {
@@ -271,29 +273,26 @@ void HistoryInner::a11yAppendStructuralClickables(
 	};
 	if (view->displayForwardedFrom()) {
 		const auto h = view->height();
-		const auto headerBottom = std::min(h / 3, 72);
-		for (auto y = 6; y < headerBottom; y += 6) {
-			for (auto x = 16; x < width(); x += 32) {
-				addFromTextState(
-					QPoint(x, y),
-					QStringLiteral("Переслано: "),
-					y);
-			}
-		}
-		for (const auto frac : { 0.08, 0.12, 0.16 }) {
+		for (const auto frac : { 0.08, 0.12, 0.16, 0.2 }) {
 			const auto y = int(h * frac);
 			addFromTextState(
 				QPoint(width() / 2, y),
 				QStringLiteral("Переслано: "),
 				y);
 		}
+		for (auto x = width() / 4; x < width(); x += width() / 4) {
+			addFromTextState(
+				QPoint(x, 12),
+				QStringLiteral("Переслано: "),
+				12);
+		}
 	}
 	if (!item->reactions().empty()) {
 		using namespace HistoryView::Reactions;
 		const auto h = view->height();
-		const auto bottomTop = std::max(h / 3, h - 96);
-		for (auto y = bottomTop; y < h - 2; y += 5) {
-			for (auto x = 12; x < width() - 4; x += 18) {
+		const auto bottomTop = std::max(h * 2 / 3, h - 48);
+		for (auto y = bottomTop; y < h - 4; y += 16) {
+			for (auto x = width() / 4; x < width(); x += width() / 4) {
 				const auto state = view->textState(QPoint(x, y), request);
 				const auto link = state.link;
 				if (!link || ReactionIdOfLink(link).empty()) {
@@ -378,71 +377,47 @@ std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {
 	}
 	auto request = StateRequest();
 	const auto messageSummary = a11yFocusedMessageSummary();
-	const auto labelFromState = [&](const TextState &state) {
-		QString detail = state.customTooltipText.simplified();
+	const auto addFromState = [&](const TextState &state, int sortY) {
 		const auto link = state.link;
-		if (link) {
-			if (detail.isEmpty()) detail = link->tooltip();
-			if (detail.isEmpty()) detail = link->url();
-			if (detail.isEmpty()) detail = link->copyToClipboardText();
-			if (detail.isEmpty()) detail = link->dragText();
-			if (detail.isEmpty()) detail = link->getTextEntity().data;
+		if (!link) {
+			return;
 		}
-		detail = detail.simplified();
-		return detail.isEmpty() ? messageSummary : detail;
-	};
-	const auto add = [&](const TextState &state, int sortY) {
-		const auto link = state.link;
-		if (!link) return;
 		if (std::find(_a11yFocusedLinks.begin(),
 				_a11yFocusedLinks.end(),
 				link) != _a11yFocusedLinks.end()) {
 			return;
 		}
+		QString detail = state.customTooltipText.simplified();
+		if (detail.isEmpty()) {
+			detail = link->tooltip().simplified();
+		}
+		if (detail.isEmpty()) {
+			detail = link->url().simplified();
+		}
+		if (detail.isEmpty()) {
+			detail = link->getTextEntity().data.simplified();
+		}
+		if (detail.isEmpty()) {
+			detail = messageSummary;
+		}
 		_a11yFocusedLinks.push_back(link);
-		_a11yFocusedLinkLabels.push_back(labelFromState(state));
+		_a11yFocusedLinkLabels.push_back(detail);
 		_a11yFocusedLinkSortY.push_back(sortY);
 	};
-	const auto scan = [&](QPoint widgetPoint) {
-		const auto itemPoint = mapPointToItem(widgetPoint, view);
-		const auto state = view->textState(itemPoint, request);
-		add(state, widgetPoint.y());
-	};
-	const auto itemHeight = view->height();
-	const auto stepY = std::max(6, itemHeight / 16);
-	const auto stepX = std::max(12, width() / 12);
-	for (auto y = top + 4; y < top + itemHeight; y += stepY) {
-		for (auto x = 4; x < width(); x += stepX) {
-			scan(QPoint(x, y));
-		}
-	}
-	for (const auto frac : { 0.5, 0.65, 0.8, 0.35, 0.95, 0.2 }) {
-		scan(QPoint(width() / 2, top + int(itemHeight * frac)));
-	}
-	// Dense bottom band (reactions, inline keyboard, comments).
-	{
-		const auto bottomTop = top + (itemHeight * 2 / 3);
-		for (auto y = bottomTop; y < top + itemHeight; y += 4) {
-			for (auto x = 4; x < width(); x += 8) {
-				scan(QPoint(x, y));
-			}
-		}
-	}
-	// Header band (forward header, reply, sender links).
-	{
-		const auto headerBottom = top + std::min(itemHeight / 3, 72);
-		const auto headerStepY = 4;
-		const auto headerStepX = std::max(8, width() / 24);
-		for (auto y = top + 2; y < headerBottom; y += headerStepY) {
-			for (auto x = 8; x < width(); x += headerStepX) {
-				scan(QPoint(x, y));
-			}
-		}
-		for (const auto frac : { 0.06, 0.1, 0.14, 0.18, 0.22 }) {
-			scan(QPoint(width() / 2, top + int(itemHeight * frac)));
-		}
-	}
+	// a11y-tab-safe-no-dense-scan-v1: structural + sparse text probes only.
 	a11yAppendStructuralClickables(view, item);
+	if (view->hasVisibleText()) {
+		const auto h = view->height();
+		const auto stepX = std::max(48, width() / 3);
+		for (const auto frac : { 0.35, 0.5, 0.65 }) {
+			const auto y = int(h * frac);
+			for (auto x = stepX; x < width() - 8; x += stepX) {
+				addFromState(
+					view->textState(QPoint(x, y), request),
+					top + y);
+			}
+		}
+	}
 	a11ySortFocusedLinksByPosition();
 	if (_a11yFocusedLinkIndex >= int(_a11yFocusedLinks.size())) {
 		_a11yFocusedLinkIndex = -1;
@@ -681,8 +656,8 @@ void HistoryInner::a11yActivateFocused() {
 
 
 def patch_cpp(src: str) -> str:
-    if FORWARD_REACTION_MARKER in src:
-        print('history_inner_widget.cpp already has forward/reaction Tab targets')
+    if TAB_SAFE_MARKER in src:
+        print('history_inner_widget.cpp already has safe Tab scan (no dense grid)')
         return src
     if 'a11yCollectFocusedLinks' not in src:
         print('WARNING: a11yCollectFocusedLinks missing — run Enter/link patch first')
@@ -747,7 +722,7 @@ def main() -> None:
     if cpp2 != cpp:
         with open(CPP_PATH, 'w', encoding='utf-8') as f:
             f.write(cpp2)
-    elif FORWARD_REACTION_MARKER not in cpp:
+    elif TAB_SAFE_MARKER not in cpp:
         print('No phase 2 changes applied')
 
 

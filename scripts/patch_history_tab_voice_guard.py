@@ -8,15 +8,32 @@ import sys
 
 ROOT = os.environ.get('TDESKTOP_ROOT', 'tdesktop')
 GUARD_MARKER = 'a11y-tab-playback-guard'
+TAB_FOCUS_GUARD_MARKER = 'a11y-tab-focus-guard-v2'
 CPP_PATH = f'{ROOT}/Telegram/SourceFiles/history/history_inner_widget.cpp'
 
-KEYPRESS_GUARD = (
+KEYPRESS_GUARD_V1 = (
     '\tif (e->key() == Qt::Key_Tab\n'
     '\t\t&& !(e->modifiers() & ~Qt::ShiftModifier)\n'
     '\t\t&& _accessibilityFocusedItem\n'
     '\t\t&& a11yShouldSkipTextStateTabScan(_accessibilityFocusedItem)) {\n'
     '\t\t// a11y-tab-playback-guard keyPressEvent\n'
     '\t\ta11yTabOnPlaybackMessage();\n'
+    '\t\te->accept();\n'
+    '\t\treturn;\n'
+    '\t}\n'
+)
+
+KEYPRESS_GUARD_V2 = (
+    '\tif (e->key() == Qt::Key_Tab\n'
+    '\t\t&& !(e->modifiers() & ~Qt::ShiftModifier)\n'
+    '\t\t&& _accessibilityFocusedItem) {\n'
+    '\t\t// a11y-tab-focus-guard-v2 keyPressEvent\n'
+    '\t\tif (a11yShouldSkipTextStateTabScan(_accessibilityFocusedItem)) {\n'
+    '\t\t\ta11yTabOnPlaybackMessage();\n'
+    '\t\t} else {\n'
+    '\t\t\ta11yMoveFocusedLink(\n'
+    '\t\t\t\t(e->modifiers() & Qt::ShiftModifier) ? -1 : 1);\n'
+    '\t\t}\n'
     '\t\te->accept();\n'
     '\t\treturn;\n'
     '\t}\n'
@@ -46,14 +63,35 @@ EVENTHOOK_TAB_NEW = (
 
 
 def patch_key_press_event(cpp: str) -> tuple[str, bool]:
-    if 'a11y-tab-playback-guard keyPressEvent' in cpp:
+    if TAB_FOCUS_GUARD_MARKER in cpp:
         return cpp, False
     if 'a11yTabOnPlaybackMessage' not in cpp:
         print('WARNING: a11yTabOnPlaybackMessage missing — run phase2 patch first')
         return cpp, False
+    if KEYPRESS_GUARD_V1 in cpp:
+        cpp2 = cpp.replace(KEYPRESS_GUARD_V1, KEYPRESS_GUARD_V2, 1)
+        if cpp2 != cpp:
+            return cpp2, True
+    if 'a11y-tab-playback-guard keyPressEvent' in cpp:
+        cpp2 = re.sub(
+            r'\tif \(e->key\(\) == Qt::Key_Tab\n'
+            r'\t\t&& !\(e->modifiers\(\) & ~Qt::ShiftModifier\)\n'
+            r'\t\t&& _accessibilityFocusedItem\n'
+            r'\t\t&& a11yShouldSkipTextStateTabScan\(_accessibilityFocusedItem\)\) \{\n'
+            r'\t\t// a11y-tab-playback-guard keyPressEvent\n'
+            r'\t\ta11yTabOnPlaybackMessage\(\);\n'
+            r'\t\te->accept\(\);\n'
+            r'\t\treturn;\n'
+            r'\t\}\n',
+            KEYPRESS_GUARD_V2,
+            cpp,
+            count=1,
+        )
+        if cpp2 != cpp:
+            return cpp2, True
     cpp2, n = re.subn(
         r'(void\s+HistoryInner::keyPressEvent\s*\(\s*QKeyEvent\s*\*\s*e\s*\)\s*\{\n)',
-        lambda m: m.group(1) + KEYPRESS_GUARD,
+        lambda m: m.group(1) + KEYPRESS_GUARD_V2,
         cpp,
         count=1,
     )
@@ -113,8 +151,8 @@ def main() -> None:
     with open(CPP_PATH, encoding='utf-8') as f:
         cpp = f.read()
 
-    if GUARD_MARKER in cpp and 'a11y-tab-playback-guard keyPressEvent' in cpp:
-        print('history_inner_widget.cpp already has Tab playback guard')
+    if TAB_FOCUS_GUARD_MARKER in cpp:
+        print('history_inner_widget.cpp already has Tab focus guard v2')
         return
 
     changed = False

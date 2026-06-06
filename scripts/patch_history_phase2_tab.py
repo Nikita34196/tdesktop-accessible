@@ -9,6 +9,7 @@ import sys
 ROOT = os.environ.get('TDESKTOP_ROOT', 'tdesktop')
 MARKER = 'a11y-phase2-clickables'
 VOICE_SAFE_MARKER = 'a11y-phase2-voice-tab-safe-v3.1'
+FORWARD_REACTION_MARKER = 'a11y-forward-reaction-structural-v1'
 BLOCK_START_RE = re.compile(
     r'^\s*// === Enter/link a11y navigation \(added by accessibility-patch\) ===',
     re.MULTILINE,
@@ -100,6 +101,7 @@ def phase2_block() -> str:
 // a11y-phase2-clickables: Tab cycles every clickable in the focused message
 // (links, inline buttons, reply header, sender, media actions), top-to-bottom.
 // a11y-phase2-voice-tab-safe-v3.1: Tab on voice must never call textState.
+// a11y-forward-reaction-structural-v1: Tab targets for forwards and reactions.
 
 [[nodiscard]] bool HistoryInner::a11yShouldSkipTextStateTabScan(
 		not_null<HistoryItem*> item) const {
@@ -239,6 +241,73 @@ void HistoryInner::a11yAppendStructuralClickables(
 					addLink(link, label, kbTop + (index * 4));
 					++index;
 				}
+			}
+		}
+	}
+	// a11y-forward-reaction-structural-v1
+	auto request = StateRequest();
+	const auto addFromTextState = [&](
+			const QPoint &localPoint,
+			const QString &labelPrefix,
+			int y) {
+		const auto state = view->textState(localPoint, request);
+		const auto link = state.link;
+		if (!link) {
+			return;
+		}
+		auto label = state.customTooltipText.simplified();
+		if (label.isEmpty()) {
+			label = link->tooltip().simplified();
+		}
+		if (label.isEmpty()) {
+			label = labelPrefix.isEmpty()
+				? QStringLiteral("Ссылка")
+				: QStringLiteral("Пересланное сообщение");
+		} else if (!labelPrefix.isEmpty()
+				&& !label.startsWith(labelPrefix)) {
+			label = labelPrefix + label;
+		}
+		addLink(link, label, sortY(y));
+	};
+	if (view->displayForwardedFrom()) {
+		const auto h = view->height();
+		const auto headerBottom = std::min(h / 3, 72);
+		for (auto y = 6; y < headerBottom; y += 6) {
+			for (auto x = 16; x < width(); x += 32) {
+				addFromTextState(
+					QPoint(x, y),
+					QStringLiteral("Переслано: "),
+					y);
+			}
+		}
+		for (const auto frac : { 0.08, 0.12, 0.16 }) {
+			const auto y = int(h * frac);
+			addFromTextState(
+				QPoint(width() / 2, y),
+				QStringLiteral("Переслано: "),
+				y);
+		}
+	}
+	if (!item->reactions().empty()) {
+		using namespace HistoryView::Reactions;
+		const auto h = view->height();
+		const auto bottomTop = std::max(h / 3, h - 96);
+		for (auto y = bottomTop; y < h - 2; y += 5) {
+			for (auto x = 12; x < width() - 4; x += 18) {
+				const auto state = view->textState(QPoint(x, y), request);
+				const auto link = state.link;
+				if (!link || ReactionIdOfLink(link).empty()) {
+					continue;
+				}
+				auto label = state.customTooltipText.simplified();
+				if (label.isEmpty()) {
+					label = QStringLiteral("Реакция");
+				}
+				const auto count = ReactionCountOfLink(item, link);
+				if (count.count > 0) {
+					label += QStringLiteral(" %1").arg(count.count);
+				}
+				addLink(link, label, sortY(y));
 			}
 		}
 	}
@@ -395,10 +464,15 @@ QString HistoryInner::a11yFocusedLinkLabel(int index, int total) const {
 		: ClickHandlerPtr();
 	const auto entity = link ? link->getTextEntity() : ClickHandler::TextEntity();
 	const auto isMarkup = dynamic_cast<ReplyMarkupClickHandler*>(link.get());
+	const auto isReaction = link
+		&& !HistoryView::Reactions::ReactionIdOfLink(link).empty();
 	const auto isLink = !isMarkup
+		&& !isReaction
 		&& link
 		&& (!link->url().isEmpty() || !entity.data.isEmpty());
-	const auto kind = isMarkup
+	const auto kind = isReaction
+		? QStringLiteral("Реакция")
+		: isMarkup
 		? QStringLiteral("Кнопка")
 		: (isLink ? QStringLiteral("Ссылка") : QStringLiteral("Вложение"));
 	auto result = QStringLiteral("%1 %2 из %3")
@@ -607,8 +681,8 @@ void HistoryInner::a11yActivateFocused() {
 
 
 def patch_cpp(src: str) -> str:
-    if VOICE_SAFE_MARKER in src:
-        print('history_inner_widget.cpp already has phase 2 voice-tab fix')
+    if FORWARD_REACTION_MARKER in src:
+        print('history_inner_widget.cpp already has forward/reaction Tab targets')
         return src
     if 'a11yCollectFocusedLinks' not in src:
         print('WARNING: a11yCollectFocusedLinks missing — run Enter/link patch first')
@@ -624,7 +698,7 @@ def patch_cpp(src: str) -> str:
     # never leave duplicate a11y* definitions (CI yaml-indented phase-1 body).
     new_src = src[:start].rstrip() + '\n\n' + phase2_block().strip() + '\n'
     if MARKER in src:
-        print('history_inner_widget.cpp upgraded (phase 2 voice-tab fix)')
+        print('history_inner_widget.cpp upgraded (forward/reaction Tab targets)')
     else:
         print('history_inner_widget.cpp patched (phase 2 clickables)')
 
@@ -639,6 +713,13 @@ def patch_cpp(src: str) -> str:
             '#include "history/view/history_view_message.h"\n',
             '#include "history/view/history_view_message.h"\n'
             '#include "history/view/history_view_reply.h"\n',
+            1,
+        )
+    if 'history/view/reactions/history_view_reactions.h' not in new_src:
+        new_src = new_src.replace(
+            '#include "history/view/history_view_reply.h"\n',
+            '#include "history/view/history_view_reply.h"\n'
+            '#include "history/view/reactions/history_view_reactions.h"\n',
             1,
         )
     return new_src
@@ -666,7 +747,7 @@ def main() -> None:
     if cpp2 != cpp:
         with open(CPP_PATH, 'w', encoding='utf-8') as f:
             f.write(cpp2)
-    elif VOICE_SAFE_MARKER not in cpp:
+    elif FORWARD_REACTION_MARKER not in cpp:
         print('No phase 2 changes applied')
 
 

@@ -2,17 +2,18 @@
 """Upgrade shared media ListWidget: Enter, Tab, context menu (patch 7n-c)."""
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = os.environ.get('REPO_NAME', 'tdesktop')
 MARKER = "a11y-media-list-actions-v1"
 
-H_PATH = ROOT / "tdesktop/Telegram/SourceFiles/info/media/info_media_list_widget.h"
-CPP_PATH = ROOT / "tdesktop/Telegram/SourceFiles/info/media/info_media_list_widget.cpp"
-INNER_H = ROOT / "tdesktop/Telegram/SourceFiles/info/media/info_media_inner_widget.h"
-INNER_CPP = ROOT / "tdesktop/Telegram/SourceFiles/info/media/info_media_inner_widget.cpp"
+H_PATH = pathlib.Path(ROOT) / "Telegram/SourceFiles/info/media/info_media_list_widget.h"
+CPP_PATH = pathlib.Path(ROOT) / "Telegram/SourceFiles/info/media/info_media_list_widget.cpp"
+INNER_H = pathlib.Path(ROOT) / "Telegram/SourceFiles/info/media/info_media_inner_widget.h"
+INNER_CPP = pathlib.Path(ROOT) / "Telegram/SourceFiles/info/media/info_media_inner_widget.cpp"
 
 HEADER_DECLS = (
     "\n\tQ_INVOKABLE void a11yMoveFocusedRow(int delta);\n"

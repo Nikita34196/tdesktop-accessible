@@ -2573,8 +2573,8 @@ jobs:
 
       # 7n-c. Shared media list — Enter to open, Tab row cycle, context menu.
       - name: Patch shared media list Enter Tab context menu
-        shell: python
-        run: python scripts/patch_media_list_actions.py
+        shell: bash
+        run: python accessibility-patch/scripts/patch_media_list_actions.py
 
       - name: Patch TopBar for shared links shortcut
         shell: python

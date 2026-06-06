@@ -690,6 +690,52 @@ inline void FocusSharedMediaList(QWidget *root) {
     AnnounceSharedMediaListRow(list);
 }
 
+// Enter / Tab / context menu on shared files list (patch 7n-c).
+inline bool HandleSharedMediaPanelKey(
+        QWidget *focused,
+        int key,
+        Qt::KeyboardModifiers mods) {
+    if (!focused) {
+        return false;
+    }
+    if (!IsSharedMediaListPanel(focused)
+            && !IsSharedMediaInnerPanel(focused)) {
+        return false;
+    }
+    QWidget *list = FindSharedMediaListWidget(focused);
+    if (!list) {
+        return false;
+    }
+    if (key == Qt::Key_Return || key == Qt::Key_Enter) {
+        if (mods & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) {
+            return false;
+        }
+        QMetaObject::invokeMethod(
+            list,
+            "a11yActivateFocused",
+            Qt::DirectConnection);
+        return true;
+    }
+    if (key == Qt::Key_Menu
+            || (key == Qt::Key_F10 && (mods & Qt::ShiftModifier))) {
+        QMetaObject::invokeMethod(
+            list,
+            "a11yShowContextMenu",
+            Qt::DirectConnection);
+        return true;
+    }
+    if (key == Qt::Key_Tab && !(mods & ~Qt::ShiftModifier)) {
+        const int delta = (mods & Qt::ShiftModifier) ? -1 : 1;
+        QMetaObject::invokeMethod(
+            list,
+            "a11yMoveFocusedRow",
+            Qt::DirectConnection,
+            Q_ARG(int, delta));
+        return true;
+    }
+    return false;
+}
+
 inline QWidget *FindTopBar(QWidget *root) {
     if (!root) return nullptr;
     if (QWidget *history = FindByType(root, "HistoryWidget")) {
@@ -883,6 +929,11 @@ protected:
         }
         if (handleBotKeyboardKeys(ke)) {
             return true;
+        }
+        if (QWidget *focused = QApplication::focusWidget()) {
+            if (detail::HandleSharedMediaPanelKey(focused, key, mods)) {
+                return true;
+            }
         }
         // Ctrl+Shift+F6 — diagnostic: dump the widget tree now,
         // so we don't have to wait for the 10s scheduled dump.

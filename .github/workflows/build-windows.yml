@@ -2713,33 +2713,17 @@ jobs:
           path: |
             Libraries
             ThirdParty
-          # v2 prefix busts the old Libraries-only cache.
-          key: win-x64-libs-v2-${{ env.CACHE_KEY }}
+          # v3: bust cache after Qt CI fix; v2 was Libraries-only era.
+          key: win-x64-libs-v3-${{ env.CACHE_KEY }}
 
       # ============================================
-      # 9. Prepare libraries (if not cached)
-      # ============================================
-      - name: Prepare libraries
-        if: steps.cache-libs.outputs.cache-hit != 'true'
-        shell: cmd
-        run: |
-          cd %REPO_NAME%
-          python Telegram\build\prepare\prepare.py
-
-      # ============================================
-      # 9b. Free disk space on the runner.
+      # 8b. Free disk space on the runner (before prepare + compile).
       #
-      # Telegram + Qt + all the bundled libraries produce ~25-30 GB of
-      # intermediate .obj / .pdb / .pch files. windows-latest images have
-      # ~14 GB free out of the box, so the link step eventually trips
-      #   error C1090: PDB API call failed, error code '12'
-      # which is MSVC's polite phrasing for "ran out of disk during PDB
-      # generation". (Reproduced in builds 69732383083 / 69732394719,
-      # both died at link time after ~3.5h of compile work.)
-      #
-      # Strip the pre-installed SDKs/toolchains we don't need to reclaim
-      # ~30 GB before the build. This is the standard fix and is what
-      # other Telegram-derived workflows do.
+      # windows-latest has ~14 GB free; prepare.py (Qt/ffmpeg/…) needs
+      # headroom and the Telegram link step needs ~25-30 GB of scratch.
+      # Running cleanup before prepare avoids Qt failures like
+      #   Cannot create parent directory …/mkspecs/modules-inst/
+      # and later MSVC error C1090 (PDB API call failed, code 12).
       # ============================================
       - name: Free disk space
         shell: pwsh
@@ -2776,6 +2760,23 @@ jobs:
           }
           Write-Host "After cleanup:"
           Get-PSDrive C | Select-Object Used,Free | Format-List
+
+      # ============================================
+      # 9. Prepare libraries (if not cached)
+      # ============================================
+      - name: Patch prepare.py for Qt CI
+        if: steps.cache-libs.outputs.cache-hit != 'true'
+        shell: bash
+        run: python accessibility-patch/scripts/patch_prepare_qt_modules_inst.py
+        env:
+          REPO_NAME: tdesktop
+
+      - name: Prepare libraries
+        if: steps.cache-libs.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          cd %REPO_NAME%
+          python Telegram\build\prepare\prepare.py
 
       # ============================================
       # 9c. Set up sccache — caches MSVC .obj files keyed on source +

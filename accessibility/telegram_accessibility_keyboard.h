@@ -736,6 +736,25 @@ inline bool HandleSharedMediaPanelKey(
     return false;
 }
 
+inline bool HandleSharedMediaContextMenu(QWidget *focused) {
+    if (!focused) {
+        return false;
+    }
+    if (!IsSharedMediaListPanel(focused)
+            && !IsSharedMediaInnerPanel(focused)) {
+        return false;
+    }
+    QWidget *list = FindSharedMediaListWidget(focused);
+    if (!list) {
+        return false;
+    }
+    QMetaObject::invokeMethod(
+        list,
+        "a11yShowContextMenu",
+        Qt::DirectConnection);
+    return true;
+}
+
 inline QWidget *FindTopBar(QWidget *root) {
     if (!root) return nullptr;
     if (QWidget *history = FindByType(root, "HistoryWidget")) {
@@ -875,10 +894,6 @@ private:
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override {
-        if (event->type() != QEvent::KeyPress) {
-            return QObject::eventFilter(obj, event);
-        }
-
         // Never hijack keys while a popup menu or modal dialog is open.
         //
         // Bug this fixes: opening a message context menu with Shift+F10
@@ -893,6 +908,19 @@ protected:
         // all make no sense there. Let every key fall through untouched.
         if (QApplication::activePopupWidget()
             || QApplication::activeModalWidget()) {
+            return QObject::eventFilter(obj, event);
+        }
+
+        if (event->type() == QEvent::ContextMenu) {
+            if (QWidget *focused = QApplication::focusWidget()) {
+                if (detail::HandleSharedMediaContextMenu(focused)) {
+                    return true;
+                }
+            }
+            return QObject::eventFilter(obj, event);
+        }
+
+        if (event->type() != QEvent::KeyPress) {
             return QObject::eventFilter(obj, event);
         }
 

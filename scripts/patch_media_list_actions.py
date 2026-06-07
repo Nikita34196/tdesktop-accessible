@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Upgrade shared media ListWidget: Enter, Tab, context menu (patch 7n-c)."""
+"""Shared media ListWidget: Enter, Tab, context menu (patches 7n-c / 7n-d)."""
 from __future__ import annotations
 
 import os
@@ -8,7 +8,8 @@ import re
 import sys
 
 ROOT = os.environ.get('REPO_NAME', 'tdesktop')
-MARKER = "a11y-media-list-actions-v1"
+MARKER_V1 = "a11y-media-list-actions-v1"
+MARKER_V2 = "a11y-media-list-context-v2"
 
 H_PATH = pathlib.Path(ROOT) / "Telegram/SourceFiles/info/media/info_media_list_widget.h"
 CPP_PATH = pathlib.Path(ROOT) / "Telegram/SourceFiles/info/media/info_media_list_widget.cpp"
@@ -129,33 +130,73 @@ void ListWidget::a11yMoveFocusedRow(int delta) {
 	}
 }
 
+// a11y-media-list-context-v2
 void ListWidget::a11yShowContextMenu() {
 	a11yEnsureFocusedIndex();
 	if (_a11yCurrentIndex < 0 || _a11yCurrentIndex >= int(_a11yFlatItems.size())) {
 		return;
 	}
 	const auto &flat = _a11yFlatItems[_a11yCurrentIndex];
-	const auto item = flat.item;
 	const auto rect = flat.rect;
-	_overState.item = const_cast<HistoryItem*>(item.get());
-	_overState.size = rect.size();
-	_overState.cursor = rect.center();
-	_overState.inside = true;
-	_overLayout = flat.layout;
-	const auto globalPos = mapToGlobal(rect.center());
+	const auto localPoint = rect.center();
+	const auto globalPos = mapToGlobal(localPoint);
+
+	// mouseActionUpdate() bails out when the scroll viewport is unset.
+	if (_visibleBottom <= _visibleTop && height() > 0) {
+		_visibleTop = 0;
+		_visibleBottom = height();
+	}
+
+	if (focusPolicy() == Qt::NoFocus) {
+		setFocusPolicy(Qt::StrongFocus);
+	}
+	setFocus(Qt::PopupFocusReason);
+	mouseActionUpdate(globalPos);
+
+	if (!_overState.item || !_overState.inside) {
+		_overState.item = const_cast<HistoryItem*>(flat.item.get());
+		_overState.size = rect.size();
+		_overState.cursor = localPoint - rect.topLeft();
+		_overState.inside = true;
+		_overLayout = flat.layout;
+	}
+
+	// Mouse reason runs mouseActionUpdate() inside showContextMenu().
 	QContextMenuEvent event(
-		QContextMenuEvent::Keyboard,
-		rect.center(),
+		QContextMenuEvent::Mouse,
+		mapFromGlobal(globalPos),
 		globalPos);
 	showContextMenu(&event, ContextMenuSource::Other);
 }
 '''
 
+LIST_CONTEXT_MENU_EVENT = r'''void ListWidget::contextMenuEvent(QContextMenuEvent *e) {
+	if (e->reason() == QContextMenuEvent::Keyboard
+			|| e->reason() == QContextMenuEvent::Other) {
+		a11yShowContextMenu();
+		e->accept();
+		return;
+	}
+	showContextMenu(
+		e,
+		(e->reason() == QContextMenuEvent::Mouse)
+			? ContextMenuSource::Mouse
+			: ContextMenuSource::Other);
+}
+'''
+
 INNER_EVENT_HOOK_H = "\tbool eventHook(QEvent *e) override;\n"
+INNER_CONTEXT_MENU_H = "\tvoid contextMenuEvent(QContextMenuEvent *e) override;\n"
 
 INNER_EVENT_HOOK_CPP = r'''
 bool InnerWidget::eventHook(QEvent *e) {
-	// a11y-media-list-actions-v1: trap Tab/Enter/context before Qt focus chain.
+	// a11y-media-list-context-v2: context menu often arrives as QEvent::ContextMenu.
+	if (_list && e->type() == QEvent::ContextMenu) {
+		_list->a11yShowContextMenu();
+		e->accept();
+		return true;
+	}
+	// a11y-media-list-actions-v1: trap Tab/Enter/context keys before Qt focus chain.
 	if (e->type() == QEvent::KeyPress && _list) {
 		auto *key = static_cast<QKeyEvent*>(e);
 		const auto k = key->key();
@@ -174,6 +215,15 @@ bool InnerWidget::eventHook(QEvent *e) {
 	}
 	return RpWidget::eventHook(e);
 }
+
+void InnerWidget::contextMenuEvent(QContextMenuEvent *e) {
+	if (_list) {
+		_list->a11yShowContextMenu();
+		e->accept();
+		return;
+	}
+	RpWidget::contextMenuEvent(e);
+}
 '''
 
 
@@ -190,42 +240,113 @@ def patch_list_header(h: str) -> str:
     )
 
 
-def patch_list_cpp(cpp: str) -> str:
-    if MARKER in cpp:
-        return cpp
-    if "ListWidget::a11yProcessKey" not in cpp:
-        print("WARNING: ListWidget::a11yProcessKey missing — skip cpp", file=sys.stderr)
-        return cpp
-
+def ensure_includes(cpp: str) -> str:
     if "#include <QContextMenuEvent>" not in cpp:
         cpp = cpp.replace(
             "#include <QKeyEvent>\n",
             "#include <QContextMenuEvent>\n#include <QKeyEvent>\n",
             1,
         )
-
-    cpp, n = re.subn(
-        r"bool ListWidget::a11yProcessKey\(QKeyEvent \*e\) \{.*?\n\}\n",
-        A11Y_PROCESS_KEY + "\n",
-        cpp,
-        count=1,
-        flags=re.DOTALL,
-    )
-    if n == 0:
-        print("ERROR: could not replace ListWidget::a11yProcessKey", file=sys.stderr)
-        sys.exit(1)
-
-    anchor = "void ListWidget::a11yActivateFocused() {"
-    if anchor not in cpp:
-        print("ERROR: a11yActivateFocused anchor missing", file=sys.stderr)
-        sys.exit(1)
-    cpp = cpp.replace(anchor, HELPER_METHODS + "\n" + anchor, 1)
     return cpp
 
 
+def patch_list_cpp(cpp: str) -> tuple[str, bool]:
+    changed = False
+    cpp = ensure_includes(cpp)
+
+    if "ListWidget::a11yProcessKey" not in cpp:
+        print("WARNING: ListWidget::a11yProcessKey missing — skip cpp", file=sys.stderr)
+        return cpp, False
+
+    if MARKER_V1 not in cpp:
+        cpp, n = re.subn(
+            r"bool ListWidget::a11yProcessKey\(QKeyEvent \*e\) \{.*?\n\}\n",
+            A11Y_PROCESS_KEY + "\n",
+            cpp,
+            count=1,
+            flags=re.DOTALL,
+        )
+        if n == 0:
+            print("ERROR: could not replace ListWidget::a11yProcessKey", file=sys.stderr)
+            sys.exit(1)
+        anchor = "void ListWidget::a11yActivateFocused() {"
+        if anchor not in cpp:
+            print("ERROR: a11yActivateFocused anchor missing", file=sys.stderr)
+            sys.exit(1)
+        cpp = cpp.replace(anchor, HELPER_METHODS + "\n" + anchor, 1)
+        changed = True
+    elif MARKER_V2 not in cpp:
+        cpp, n = re.subn(
+            r"void ListWidget::a11yShowContextMenu\(\) \{.*?\n\}\n",
+            (
+                "// a11y-media-list-context-v2\n"
+                "void ListWidget::a11yShowContextMenu() {\n"
+                "\ta11yEnsureFocusedIndex();\n"
+                "\tif (_a11yCurrentIndex < 0 || _a11yCurrentIndex >= int(_a11yFlatItems.size())) {\n"
+                "\t\treturn;\n"
+                "\t}\n"
+                "\tconst auto &flat = _a11yFlatItems[_a11yCurrentIndex];\n"
+                "\tconst auto rect = flat.rect;\n"
+                "\tconst auto localPoint = rect.center();\n"
+                "\tconst auto globalPos = mapToGlobal(localPoint);\n"
+                "\n"
+                "\tif (_visibleBottom <= _visibleTop && height() > 0) {\n"
+                "\t\t_visibleTop = 0;\n"
+                "\t\t_visibleBottom = height();\n"
+                "\t}\n"
+                "\n"
+                "\tif (focusPolicy() == Qt::NoFocus) {\n"
+                "\t\tsetFocusPolicy(Qt::StrongFocus);\n"
+                "\t}\n"
+                "\tsetFocus(Qt::PopupFocusReason);\n"
+                "\tmouseActionUpdate(globalPos);\n"
+                "\n"
+                "\tif (!_overState.item || !_overState.inside) {\n"
+                "\t\t_overState.item = const_cast<HistoryItem*>(flat.item.get());\n"
+                "\t\t_overState.size = rect.size();\n"
+                "\t\t_overState.cursor = localPoint - rect.topLeft();\n"
+                "\t\t_overState.inside = true;\n"
+                "\t\t_overLayout = flat.layout;\n"
+                "\t}\n"
+                "\n"
+                "\tQContextMenuEvent event(\n"
+                "\t\tQContextMenuEvent::Mouse,\n"
+                "\t\tmapFromGlobal(globalPos),\n"
+                "\t\tglobalPos);\n"
+                "\tshowContextMenu(&event, ContextMenuSource::Other);\n"
+                "}\n"
+            ),
+            cpp,
+            count=1,
+            flags=re.DOTALL,
+        )
+        if n == 0:
+            print("ERROR: could not upgrade ListWidget::a11yShowContextMenu", file=sys.stderr)
+            sys.exit(1)
+        changed = True
+
+    if "a11yShowContextMenu();\n\t\te->accept();\n\t\treturn;\n\t}\n\tshowContextMenu(" not in cpp:
+        cpp, n = re.subn(
+            r"void ListWidget::contextMenuEvent\(QContextMenuEvent \*e\) \{\n"
+            r"\tshowContextMenu\(\n"
+            r"\t\te,\n"
+            r"\t\t\(e->reason\(\) == QContextMenuEvent::Mouse\)\n"
+            r"\t\t\t\? ContextMenuSource::Mouse\n"
+            r"\t\t\t: ContextMenuSource::Other\);\n"
+            r"\}\n",
+            LIST_CONTEXT_MENU_EVENT + "\n",
+            cpp,
+            count=1,
+        )
+        if n == 0:
+            print("ERROR: ListWidget::contextMenuEvent landmark not found", file=sys.stderr)
+            sys.exit(1)
+        changed = True
+
+    return cpp, changed
+
+
 def patch_inner_header(h: str) -> str:
-    if "eventHook" in h:
-        return h
     if "keyPressEvent" not in h:
         h, n = re.subn(
             r"(protected:\s*\n)",
@@ -236,30 +357,68 @@ def patch_inner_header(h: str) -> str:
         if n == 0:
             print("WARNING: InnerWidget protected: not found", file=sys.stderr)
             return h
-    return h.replace(
-        "void keyPressEvent(QKeyEvent *e) override;\n",
-        "void keyPressEvent(QKeyEvent *e) override;\n" + INNER_EVENT_HOOK_H,
-        1,
-    )
+    if "eventHook" not in h:
+        h = h.replace(
+            "void keyPressEvent(QKeyEvent *e) override;\n",
+            "void keyPressEvent(QKeyEvent *e) override;\n" + INNER_EVENT_HOOK_H,
+            1,
+        )
+    if "contextMenuEvent" not in h:
+        anchor = "void keyPressEvent(QKeyEvent *e) override;\n"
+        if "eventHook" in h:
+            anchor = "bool eventHook(QEvent *e) override;\n"
+        h = h.replace(anchor, anchor + INNER_CONTEXT_MENU_H, 1)
+    return h
 
 
-def patch_inner_cpp(cpp: str) -> str:
-    if MARKER in cpp:
-        return cpp
-    if "InnerWidget::keyPressEvent" not in cpp:
-        print("WARNING: InnerWidget::keyPressEvent missing — skip inner cpp", file=sys.stderr)
-        return cpp
+def patch_inner_cpp(cpp: str) -> tuple[str, bool]:
+    if "InnerWidget::keyPressEvent" not in cpp and "InnerWidget::eventHook" not in cpp:
+        print("WARNING: InnerWidget key handlers missing — skip inner cpp", file=sys.stderr)
+        return cpp, False
+
     if "#include <QEvent>" not in cpp:
         cpp = cpp.replace(
             "#include <QKeyEvent>\n",
             "#include <QEvent>\n#include <QKeyEvent>\n",
             1,
         )
-    anchor = "\n} // namespace Media\n} // namespace Info"
-    if anchor not in cpp:
-        print("ERROR: inner_widget namespace close not found", file=sys.stderr)
-        sys.exit(1)
-    return cpp.replace(anchor, INNER_EVENT_HOOK_CPP + anchor, 1)
+    if "#include <QContextMenuEvent>" not in cpp:
+        cpp = cpp.replace(
+            "#include <QKeyEvent>\n",
+            "#include <QContextMenuEvent>\n#include <QKeyEvent>\n",
+            1,
+        )
+
+    if MARKER_V2 in cpp:
+        return cpp, False
+
+    old_hook = (
+        "bool InnerWidget::eventHook(QEvent *e) {\n"
+        "\t// a11y-media-list-actions-v1: trap Tab/Enter/context before Qt focus chain.\n"
+        "\tif (e->type() == QEvent::KeyPress && _list) {\n"
+    )
+    if old_hook in cpp:
+        cpp = re.sub(
+            r"bool InnerWidget::eventHook\(QEvent \*e\) \{.*?\n\}\n",
+            INNER_EVENT_HOOK_CPP.strip() + "\n",
+            cpp,
+            count=1,
+            flags=re.DOTALL,
+        )
+        if "InnerWidget::contextMenuEvent" not in cpp:
+            anchor = "\n} // namespace Media\n} // namespace Info"
+            cpp = cpp.replace(anchor, INNER_EVENT_HOOK_CPP + anchor, 1)
+        return cpp, True
+
+    if "InnerWidget::eventHook" not in cpp:
+        anchor = "\n} // namespace Media\n} // namespace Info"
+        if anchor not in cpp:
+            print("ERROR: inner_widget namespace close not found", file=sys.stderr)
+            sys.exit(1)
+        cpp = cpp.replace(anchor, INNER_EVENT_HOOK_CPP + anchor, 1)
+        return cpp, True
+
+    return cpp, False
 
 
 def main() -> int:
@@ -274,21 +433,23 @@ def main() -> int:
     inner_h = INNER_H.read_text(encoding="utf-8")
     inner_cpp = INNER_CPP.read_text(encoding="utf-8")
 
-    orig_cpp = cpp
     h = patch_list_header(h)
-    cpp = patch_list_cpp(cpp)
+    cpp, list_changed = patch_list_cpp(cpp)
     inner_h = patch_inner_header(inner_h)
-    inner_cpp = patch_inner_cpp(inner_cpp)
+    inner_cpp, inner_changed = patch_inner_cpp(inner_cpp)
 
-    if cpp == orig_cpp and MARKER in orig_cpp:
-        print("info_media_list_widget.cpp already has media list actions")
+    if not list_changed and not inner_changed:
+        if MARKER_V2 in cpp:
+            print("info_media_list_widget: context menu v2 already patched")
+        else:
+            print("info_media_list_widget.cpp already has media list actions")
         return 0
 
     H_PATH.write_text(h, encoding="utf-8")
     CPP_PATH.write_text(cpp, encoding="utf-8")
     INNER_H.write_text(inner_h, encoding="utf-8")
     INNER_CPP.write_text(inner_cpp, encoding="utf-8")
-    print("info_media_list_widget: Enter/Tab/context menu patched (7n-c)")
+    print("info_media_list_widget: context menu v2 patched (7n-d)")
     return 0
 
 

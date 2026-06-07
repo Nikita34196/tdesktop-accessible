@@ -11,6 +11,7 @@ MARKER = 'a11y-phase2-clickables'
 VOICE_SAFE_MARKER = 'a11y-phase2-voice-tab-safe-v3.1'
 FORWARD_REACTION_MARKER = 'a11y-forward-reaction-structural-v1'
 TAB_SAFE_MARKER = 'a11y-tab-safe-no-dense-scan-v1'
+PLAIN_TEXT_MARKER = 'a11y-tab-plain-text-safe-v1'
 BLOCK_START_RE = re.compile(
     r'^\s*// === Enter/link a11y navigation \(added by accessibility-patch\) ===',
     re.MULTILINE,
@@ -46,6 +47,20 @@ def patch_header(src: str) -> str:
         src, n = re.subn(
             r'(\[\[nodiscard\]\]\s+bool\s+a11yShouldSkipTextStateTabScan\s*\([^;]+;\s*)',
             lambda m: m.group(1) + '\tvoid a11yTabOnPlaybackMessage();\n',
+            src,
+            count=1,
+        )
+        if n:
+            changed = True
+    if 'a11yShouldAvoidTextStateHitTest' not in src:
+        src, n = re.subn(
+            r'(\[\[nodiscard\]\]\s+bool\s+a11yShouldSkipTextStateTabScan\s*\([^;]+;\s*)',
+            lambda m: m.group(1)
+            + '\n\t[[nodiscard]] bool a11yShouldAvoidTextStateHitTest('
+            + '\n\t\tnot_null<HistoryItem*> item) const;'
+            + '\n\tvoid a11yAppendEntityTextLinks('
+            + '\n\t\tnot_null<HistoryItem*> item,'
+            + '\n\t\tint sortY);',
             src,
             count=1,
         )
@@ -104,6 +119,7 @@ def phase2_block() -> str:
 // a11y-phase2-voice-tab-safe-v3.1: Tab on voice must never call textState.
 // a11y-forward-reaction-structural-v1: Tab targets for forwards and reactions.
 // a11y-tab-safe-no-dense-scan-v1: no full-message textState grid on Tab.
+// a11y-tab-plain-text-safe-v1: plain text messages never call textState on Tab.
 
 [[nodiscard]] bool HistoryInner::a11yShouldSkipTextStateTabScan(
 		not_null<HistoryItem*> item) const {
@@ -140,6 +156,58 @@ def phase2_block() -> str:
 		}
 	}
 	return false;
+}
+
+[[nodiscard]] bool HistoryInner::a11yShouldAvoidTextStateHitTest(
+		not_null<HistoryItem*> item) const {
+	if (a11yShouldSkipTextStateTabScan(item)) {
+		return true;
+	}
+	if (item->Get<HistoryMessageReplyMarkup>()) {
+		return false;
+	}
+	const auto media = item->media();
+	if (!media) {
+		return true;
+	}
+	if (media->document() || media->photo()) {
+		return false;
+	}
+	return true;
+}
+
+void HistoryInner::a11yAppendEntityTextLinks(
+		not_null<HistoryItem*> item,
+		int sortY) {
+	const auto &rich = item->translatedTextWithLocalEntities();
+	const auto &plain = rich.text;
+	for (const auto &entity : rich.entities) {
+		const auto type = entity.type();
+		if (type != EntityType::Url && type != EntityType::CustomUrl) {
+			continue;
+		}
+		const auto start = entity.offset();
+		const auto length = entity.length();
+		if (start < 0 || length <= 0 || start + length > plain.size()) {
+			continue;
+		}
+		const auto visible = plain.mid(start, length);
+		const auto url = (type == EntityType::CustomUrl)
+			? entity.data()
+			: visible;
+		if (url.isEmpty()) {
+			continue;
+		}
+		const auto link = std::make_shared<HiddenUrlClickHandler>(url);
+		if (std::find(_a11yFocusedLinks.begin(),
+				_a11yFocusedLinks.end(),
+				link) != _a11yFocusedLinks.end()) {
+			continue;
+		}
+		_a11yFocusedLinks.push_back(link);
+		_a11yFocusedLinkLabels.push_back(visible);
+		_a11yFocusedLinkSortY.push_back(sortY);
+	}
 }
 
 void HistoryInner::a11yTabOnPlaybackMessage() {
@@ -271,48 +339,51 @@ void HistoryInner::a11yAppendStructuralClickables(
 		}
 		addLink(link, label, sortY(y));
 	};
-	if (view->displayForwardedFrom()) {
-		const auto h = view->height();
-		for (const auto frac : { 0.08, 0.12, 0.16, 0.2 }) {
-			const auto y = int(h * frac);
-			addFromTextState(
-				QPoint(width() / 2, y),
-				QStringLiteral("Переслано: "),
-				y);
-		}
-		for (auto x = width() / 4; x < width(); x += width() / 4) {
-			addFromTextState(
-				QPoint(x, 12),
-				QStringLiteral("Переслано: "),
-				12);
-		}
-	}
-	if (!item->reactions().empty()) {
-		using namespace HistoryView::Reactions;
-		const auto h = view->height();
-		const auto bottomTop = std::max(h * 2 / 3, h - 48);
-		for (auto y = bottomTop; y < h - 4; y += 16) {
+	if (!a11yShouldAvoidTextStateHitTest(item)) {
+		if (view->displayForwardedFrom()) {
+			const auto h = view->height();
+			for (const auto frac : { 0.08, 0.12, 0.16, 0.2 }) {
+				const auto y = int(h * frac);
+				addFromTextState(
+					QPoint(width() / 2, y),
+					QStringLiteral("Переслано: "),
+					y);
+			}
 			for (auto x = width() / 4; x < width(); x += width() / 4) {
-				const auto state = view->textState(QPoint(x, y), request);
-				const auto link = state.link;
-				if (!link || ReactionIdOfLink(link).empty()) {
-					continue;
+				addFromTextState(
+					QPoint(x, 12),
+					QStringLiteral("Переслано: "),
+					12);
+			}
+		}
+		if (!item->reactions().empty()) {
+			using namespace HistoryView::Reactions;
+			const auto h = view->height();
+			const auto bottomTop = std::max(h * 2 / 3, h - 48);
+			for (auto y = bottomTop; y < h - 4; y += 16) {
+				for (auto x = width() / 4; x < width(); x += width() / 4) {
+					const auto state = view->textState(QPoint(x, y), request);
+					const auto link = state.link;
+					if (!link || ReactionIdOfLink(link).empty()) {
+						continue;
+					}
+					auto label = state.customTooltipText.simplified();
+					if (label.isEmpty()) {
+						label = QStringLiteral("Реакция");
+					}
+					const auto count = ReactionCountOfLink(item, link);
+					if (count.count > 0) {
+						label += QStringLiteral(" %1").arg(count.count);
+					}
+					addLink(link, label, sortY(y));
 				}
-				auto label = state.customTooltipText.simplified();
-				if (label.isEmpty()) {
-					label = QStringLiteral("Реакция");
-				}
-				const auto count = ReactionCountOfLink(item, link);
-				if (count.count > 0) {
-					label += QStringLiteral(" %1").arg(count.count);
-				}
-				addLink(link, label, sortY(y));
 			}
 		}
 	}
 	// Probing media->textState on voice/video calls Document::setSeekingStart
 	// and repaint per sample — a dense Tab scan freezes or crashes Telegram.
-	if (!a11yShouldSkipTextStateTabScan(item)) {
+	if (!a11yShouldAvoidTextStateHitTest(item)
+			&& !a11yShouldSkipTextStateTabScan(item)) {
 		if (const auto media = view->media()) {
 			const auto h = view->height();
 			const auto center = sortY(h / 2);
@@ -406,7 +477,9 @@ std::vector<ClickHandlerPtr> HistoryInner::a11yCollectFocusedLinks() {
 	};
 	// a11y-tab-safe-no-dense-scan-v1: structural + sparse text probes only.
 	a11yAppendStructuralClickables(view, item);
-	if (view->hasVisibleText()) {
+	if (a11yShouldAvoidTextStateHitTest(item)) {
+		a11yAppendEntityTextLinks(item, top + view->height() / 2);
+	} else if (view->hasVisibleText()) {
 		const auto h = view->height();
 		const auto stepX = std::max(48, width() / 3);
 		for (const auto frac : { 0.35, 0.5, 0.65 }) {
@@ -656,8 +729,8 @@ void HistoryInner::a11yActivateFocused() {
 
 
 def patch_cpp(src: str) -> str:
-    if TAB_SAFE_MARKER in src:
-        print('history_inner_widget.cpp already has safe Tab scan (no dense grid)')
+    if PLAIN_TEXT_MARKER in src:
+        print('history_inner_widget.cpp already has plain-text Tab safe path')
         return src
     if 'a11yCollectFocusedLinks' not in src:
         print('WARNING: a11yCollectFocusedLinks missing — run Enter/link patch first')
@@ -672,11 +745,18 @@ def patch_cpp(src: str) -> str:
     # Phase-1 patch always appends this block at EOF; drop through end so we
     # never leave duplicate a11y* definitions (CI yaml-indented phase-1 body).
     new_src = src[:start].rstrip() + '\n\n' + phase2_block().strip() + '\n'
-    if MARKER in src:
-        print('history_inner_widget.cpp upgraded (forward/reaction Tab targets)')
+    if TAB_SAFE_MARKER in src or MARKER in src:
+        print('history_inner_widget.cpp upgraded (plain-text Tab safe)')
     else:
         print('history_inner_widget.cpp patched (phase 2 clickables)')
 
+    if '#include "core/click_handler_types.h"' not in new_src:
+        new_src = new_src.replace(
+            '#include "history/history_inner_widget.h"\n',
+            '#include "history/history_inner_widget.h"\n'
+            '#include "core/click_handler_types.h"\n',
+            1,
+        )
     if '#include <numeric>' not in new_src:
         new_src = new_src.replace(
             '#include "history/history_inner_widget.h"\n',
@@ -722,7 +802,7 @@ def main() -> None:
     if cpp2 != cpp:
         with open(CPP_PATH, 'w', encoding='utf-8') as f:
             f.write(cpp2)
-    elif TAB_SAFE_MARKER not in cpp:
+    elif PLAIN_TEXT_MARKER not in cpp:
         print('No phase 2 changes applied')
 
 

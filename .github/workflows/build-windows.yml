@@ -1657,6 +1657,10 @@ jobs:
         shell: bash
         run: python accessibility-patch/scripts/patch_history_tab_voice_guard.py
 
+      - name: Patch Tab dedupe in HistoryInner keyPressEvent
+        shell: bash
+        run: python accessibility-patch/scripts/patch_history_tab_dedupe.py
+
       # ============================================
       # 7h. Rich message labels for arrow-key navigation.
       #     Step 7b may be skipped when upstream already ships

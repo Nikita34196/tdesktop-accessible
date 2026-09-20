@@ -35,7 +35,7 @@
 | Режим **Screen Reader** (авто + отключение в настройках) | Меньше ломать обычных пользователей, единая семантика с tdesktop |
 | **Прочитано по фокусу**, а не по видимости ([#31032](https://github.com/telegramdesktop/tdesktop/pull/31032)) | Счётчик непрочитанных совпадает с тем, что реально озвучил NVDA |
 | Фокус **списка чатов при старте** в SR-режиме | Нет «пустого» Qt-контейнера при запуске |
-| Детальная разметка **HistoryView** (`MessageSubItem`, sub-elements) | Более точная озвучка частей сообщения без костылей |
+| Детальная разметка **HistoryView** (`MessageSubItem`, `MessageAccessibilityName`) | Используем в сборке напрямую; наш `ListAccessible` не подменяет `HistoryInner` / список чатов |
 | Открытые PR: заголовки поиска ([#30722](https://github.com/telegramdesktop/tdesktop/pull/30722)), **PeerList** ([#30755](https://github.com/telegramdesktop/tdesktop/pull/30755)) | Следить и портировать после мержа |
 
 База tdesktop **зафиксирована** тегом `TDESKTOP_REF` в CI (см. [docs/UPSTREAM_BUMP.md](docs/UPSTREAM_BUMP.md)). Поднятие версии — по чеклисту там; скрипт `scripts/a11y_upstream_patches.py` — для точечных правок поверх выбранного тега.

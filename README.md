@@ -4,6 +4,14 @@
 
 Готовые сборки — в разделе [Releases](../../releases). Скачал → запустил → работает.
 
+### Упрощённая версия (Simple)
+
+Нужна **короткая озвучка** и меньше «шума» в NVDA — смотрите отдельный гибрид **Telegram Accessible Simple**:
+
+- Ветка с полным деревом Simple: [`export/tdesktop-accessible-simple`](../../tree/export/tdesktop-accessible-simple)
+- Как вынести в свой репозиторий: [docs/PUBLISH_NEW_REPO.md](docs/PUBLISH_NEW_REPO.md) (имя `tdesktop-accessible-simple` на GitHub)
+- После публикации: https://github.com/Nikita34196/tdesktop-accessible-simple
+
 ---
 
 ## Для пользователей

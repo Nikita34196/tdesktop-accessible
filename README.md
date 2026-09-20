@@ -86,7 +86,7 @@ Telegram Desktop использует Qt, но рисует интерфейс �
 ### Как собирается
 
 GitHub Actions автоматически:
-1. Клонирует официальный `telegramdesktop/tdesktop`
+1. Клонирует официальный `telegramdesktop/tdesktop` на зафиксированный тег **`TDESKTOP_REF`** (сейчас **v7.2.9**; обновление — [docs/UPSTREAM_BUMP.md](docs/UPSTREAM_BUMP.md))
 2. Копирует наши файлы в `Telegram/SourceFiles/ui/accessibility/`
 3. Патчит `CMakeLists.txt` (добавляет наши файлы в сборку)
 4. Патчит `application.cpp` (вызывает `TgAccessibility::Install()` при старте)

@@ -12,6 +12,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      tdesktop_ref:
+        description: >-
+          Override tdesktop tag/branch (empty = pinned TDESKTOP_REF in workflow)
+        required: false
+        type: string
   release:
     types: [published]
 
@@ -31,6 +37,8 @@ jobs:
 
     env:
       REPO_NAME: tdesktop
+      # Pinned upstream base — bump via docs/UPSTREAM_BUMP.md
+      TDESKTOP_REF: v7.2.9
 
     steps:
       # ============================================
@@ -69,7 +77,14 @@ jobs:
       - name: Clone Telegram Desktop
         shell: bash
         run: |
-          git clone --recursive https://github.com/telegramdesktop/tdesktop.git $REPO_NAME
+          REF="${{ github.event.inputs.tdesktop_ref }}"
+          if [ -z "$REF" ]; then
+            REF="$TDESKTOP_REF"
+          fi
+          echo "Cloning telegramdesktop/tdesktop @ ${REF}"
+          echo "TDESKTOP_REF=${REF}" >> $GITHUB_ENV
+          git clone --recursive --depth 1 --branch "$REF" \
+            https://github.com/telegramdesktop/tdesktop.git "$REPO_NAME"
 
       - name: Get repository info
         shell: bash
@@ -2707,7 +2722,7 @@ jobs:
             BASE_KEY=no-prepare-file
           fi
           A11Y_HASH=$(sha256sum accessibility-patch/accessibility/* accessibility-patch/.github/workflows/build-windows.yml 2>/dev/null | sha256sum | awk '{ print $1 }')
-          echo "CACHE_KEY=${BASE_KEY}-a11y-${A11Y_HASH}" >> $GITHUB_ENV
+          echo "CACHE_KEY=${TDESKTOP_REF}-${BASE_KEY}-a11y-${A11Y_HASH}" >> $GITHUB_ENV
 
       - name: Restore libraries cache
         id: cache-libs
@@ -2962,6 +2977,7 @@ jobs:
         run: |
           REF="${GITHUB_REF_NAME:-dev}"
           echo "Telegram Desktop Accessible ${REF}" > artifact/version.txt
+          echo "tdesktop_ref=${{ env.TDESKTOP_REF }}" >> artifact/version.txt
           echo "tdesktop=${{ env.TDESKTOP_VERSION }}" >> artifact/version.txt
           echo "updates=${{ github.server_url }}/${{ github.repository }}/releases/latest" >> artifact/version.txt
 

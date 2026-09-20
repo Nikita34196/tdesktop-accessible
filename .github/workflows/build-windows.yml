@@ -2899,26 +2899,42 @@ jobs:
 
       # ============================================
       # 9d. Pagefile — final Telegram.exe link can hit LNK1102 on 16 GB runners.
-      #     Win32_PageFileSetting CIM create is brittle on GHA; use WMI + D: when free.
+      #     Get-CimInstance -EnableAllPrivileges is invalid on GHA pwsh (#30).
+      #     al-cheb/configure-pagefile-action is the usual fix; WMI script is fallback.
       # ============================================
+      - name: Configure pagefile (action)
+        continue-on-error: true
+        uses: al-cheb/configure-pagefile-action@v1.5
+        with:
+          minimum-size: 32GB
+          maximum-size: 48GB
+          disk-root: "C:"
+
       - name: Expand Windows pagefile for linker
+        continue-on-error: true
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $sys = Get-WmiObject Win32_ComputerSystem -EnableAllPrivileges
-          $sys.AutomaticManagedPagefile = $false
-          [void]$sys.Put()
+          try {
+            $sys = Get-WmiObject Win32_ComputerSystem
+            $sys.AutomaticManagedPagefile = $false
+            [void]$sys.Put()
 
-          $drive = if (Test-Path 'D:\') { 'D' } else { 'C' }
-          $name = "${drive}:\pagefile.sys"
-          $pf = Get-WmiObject Win32_PageFileSetting -ErrorAction SilentlyContinue
-          if (-not $pf) {
-            $pf = ([wmiclass]'Win32_PageFileSetting').CreateInstance()
+            $drive = if (Test-Path 'D:\') { 'D' } else { 'C' }
+            $name = "${drive}:\pagefile.sys"
+            $pf = Get-WmiObject Win32_PageFileSetting -ErrorAction SilentlyContinue
+            if (-not $pf) {
+              $pf = ([wmiclass]'Win32_PageFileSetting').CreateInstance()
+            }
+            $pf.Name = $name
+            $pf.InitialSize = 49152
+            $pf.MaximumSize = 49152
+            [void]$pf.Put()
+          } catch {
+            Write-Warning "WMI pagefile failed: $_ — leaving OS-managed pagefile."
+            $sys = Get-WmiObject Win32_ComputerSystem
+            $sys.AutomaticManagedPagefile = $true
+            [void]$sys.Put()
           }
-          $pf.Name = $name
-          $pf.InitialSize = 49152
-          $pf.MaximumSize = 49152
-          [void]$pf.Put()
 
           Get-WmiObject Win32_PageFileSetting |
             Select-Object Name, InitialSize, MaximumSize |
@@ -2959,7 +2975,7 @@ jobs:
               -D TDESKTOP_API_HASH=${{ secrets.API_HASH }} ^
               -D CMAKE_POLICY_DEFAULT_CMP0141=NEW ^
               -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded ^
-              -D CMAKE_EXE_LINKER_FLAGS="/DEBUG:FASTLINK /CGTHREADS:1" ^
+              -D CMAKE_EXE_LINKER_FLAGS_RELEASE="/DEBUG:NONE /CGTHREADS:1" ^
               -D CMAKE_CXX_COMPILER_LAUNCHER=sccache ^
               -D CMAKE_C_COMPILER_LAUNCHER=sccache
 
@@ -2984,8 +3000,9 @@ jobs:
           set _CL_=/Z7 %_CL_%
           rem Free RAM before the final link (sccache daemon + pagefile above).
           sccache --stop-server 2>nul
-          set _LINK_=/DEBUG:FASTLINK /CGTHREADS:1 %_LINK_%
-          cmake --build out --config Release --target Telegram --parallel 2
+          rem /Z7 stays in .obj for sccache; skip PDB merge at link to avoid LNK1102.
+          set _LINK_=/DEBUG:NONE /CGTHREADS:1 %_LINK_%
+          cmake --build out --config Release --target Telegram --parallel 1
           set BUILD_RC=%ERRORLEVEL%
           sccache --show-stats || rem ignore if sccache absent
           if not "%BUILD_RC%"=="0" exit /b %BUILD_RC%

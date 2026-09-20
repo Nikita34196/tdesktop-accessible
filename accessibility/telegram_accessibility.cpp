@@ -442,6 +442,21 @@ QAccessibleInterface *Factory(
         return nullptr;
     }
 
+    // Upstream tdesktop exposes rich list/message trees via RpWidget
+    // accessibilityChild* hooks. A shallow ListAccessible would hide them.
+    const auto upstreamListA11y =
+        typeName.contains(QLatin1String("Dialogs::InnerWidget"))
+        || typeName.contains(QLatin1String("HistoryInner"))
+        || typeName.contains(QLatin1String("HistoryView::ListWidget"));
+    if (upstreamListA11y) {
+        if (const TypeRule *r = MatchByTypeName(typeName)) {
+            if (r->accessibleName && w->accessibleName().isEmpty()) {
+                w->setAccessibleName(QString::fromUtf8(r->accessibleName));
+            }
+        }
+        return nullptr;
+    }
+
     // Primary path: match by real C++ type via typeid. This catches
     // Telegram-specific classes that all collapse to "Ui::RpWidget"
     // under metaObject()->className().
@@ -465,8 +480,10 @@ QAccessibleInterface *Factory(
         || classname.contains("ComposeControls")) {
         return new InputFieldAccessible(w);
     }
-    if (classname.contains("InnerWidget")
-        || classname.contains("ListWidget")
+    if ((classname.contains("InnerWidget")
+            && !typeName.contains(QLatin1String("Dialogs::InnerWidget")))
+        || (classname.contains("ListWidget")
+            && !typeName.contains(QLatin1String("HistoryView::ListWidget")))
         || classname.contains("PeerListContent")) {
         return new ListAccessible(w);
     }

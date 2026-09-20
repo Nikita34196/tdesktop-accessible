@@ -54,3 +54,11 @@ env:
 ## Связь с официальным a11y
 
 При bump сверяйтесь с [#476](https://github.com/telegramdesktop/tdesktop/issues/476) и [CONTRIBUTING.md](../CONTRIBUTING.md) (раздел про upstream): часть наших inject-патчей можно удалять, если то же уже в tdesktop.
+
+На **v7.2.9+** официальный клиент уже отдаёт:
+
+- имена сообщений через `HistoryView::MessageAccessibilityName` (шаг **7h** в CI пропускается);
+- список чатов / историю через `accessibilityChild*` (шаги **7b/7c** пропускаются);
+- «прочитано» при навигации стрелками в SR-режиме.
+
+Наш слой `accessibility/` **не подменяет** `HistoryInner` / `Dialogs::InnerWidget` / `HistoryView::ListWidget` своим `ListAccessible` — только русские подписи панелей и хоткеи/NVDA.

@@ -535,50 +535,9 @@ QString HistoryInner::a11yFocusedLinkLabel(int index, int total) const {
 
 QString HistoryInner::a11yMessageSummaryForView(
 		not_null<Element*> view) const {
-	constexpr int kMaxSummaryChars = 160;
-	auto parts = QStringList();
-	if (const auto item = view->data()) {
-		if (const auto from = item->from()) {
-			const auto sender = from->name();
-			if (!sender.isEmpty()) {
-				parts.push_back(sender);
-			}
-		}
-	}
-	const auto active = HistoryView::ActiveMessageSubItems(view, _history);
-	for (const auto subItem : active) {
-		if (subItem == HistoryView::MessageSubItem::Message) {
-			continue;
-		}
-		auto value = HistoryView::MessageSubItemValue(
-			view,
-			_history,
-			subItem).simplified();
-		if (value.isEmpty()) {
-			continue;
-		}
-		const auto label = HistoryView::MessageSubItemLabel(subItem).simplified();
-		parts.push_back(label.isEmpty()
-			? value
-			: (label + QStringLiteral(": ") + value));
-		if (parts.size() >= 6) {
-			break;
-		}
-	}
-	if (parts.isEmpty()) {
-		const auto message = HistoryView::MessageSubItemValue(
-			view,
-			_history,
-			HistoryView::MessageSubItem::Message).simplified();
-		if (!message.isEmpty()) {
-			parts.push_back(message.left(120));
-		}
-	}
-	auto result = parts.join(QStringLiteral(", "));
-	if (result.isEmpty()) {
-		result = view->data()->notificationText().text.simplified();
-	}
-	return result.left(kMaxSummaryChars);
+	constexpr int kMaxSummaryChars = 512;
+	return HistoryView::MessageAccessibilityName(view, _history)
+		.left(kMaxSummaryChars);
 }
 
 QString HistoryInner::a11yFocusedMessageSummary() const {

@@ -2898,6 +2898,29 @@ jobs:
             tdesktop-msvc-
 
       # ============================================
+      # 9d. Pagefile — final Telegram.exe link can hit LNK1102 on 16 GB runners.
+      # ============================================
+      - name: Expand Windows pagefile for linker
+        shell: pwsh
+        run: |
+          $cs = Get-CimInstance Win32_ComputerSystem -EnableAllPrivileges
+          Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $false }
+          $pf = Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue
+          if (-not $pf) {
+            $pf = New-CimInstance -ClassName Win32_PageFileSetting -Property @{
+              Name = 'C:\pagefile.sys'
+              InitialSize = 49152
+              MaximumSize = 49152
+            }
+          } else {
+            Set-CimInstance -InputObject $pf -Property @{
+              InitialSize = 49152
+              MaximumSize = 49152
+            }
+          }
+          Get-CimInstance Win32_PageFileSetting | Format-List Name, InitialSize, MaximumSize
+
+      # ============================================
       # 10. Configure
       #
       # Switched to Ninja Multi-Config generator. Three reasons all the
@@ -2954,12 +2977,16 @@ jobs:
         run: |
           cd %REPO_NAME%
           set _CL_=/Z7 %_CL_%
+          rem LNK1102: cap linker threads; pagefile step above adds virtual memory.
+          set _LINK_=/CGTHREADS:1 %_LINK_%
           cmake --build out --config Release --target Telegram --parallel 2
-          if errorlevel 1 (
-            sccache --show-stats || rem ignore if sccache absent
-            exit /b 1
-          )
+          set BUILD_RC=%ERRORLEVEL%
           sccache --show-stats || rem ignore if sccache absent
+          if not "%BUILD_RC%"=="0" exit /b %BUILD_RC%
+          if exist out\Telegram\Release\Telegram.exe exit /b 0
+          if exist out\Release\Telegram.exe exit /b 0
+          echo ERROR: cmake finished but Telegram.exe is missing (link may have failed silently).
+          exit /b 1
 
       # ============================================
       # 12. Package

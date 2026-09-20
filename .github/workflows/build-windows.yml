@@ -2864,6 +2864,13 @@ jobs:
         env:
           REPO_NAME: tdesktop
 
+      - name: Patch prepare.py to skip breakpad dump_syms on CI
+        if: steps.cache-libs.outputs.cache-hit != 'true'
+        shell: bash
+        run: python accessibility-patch/scripts/patch_prepare_skip_dump_syms.py
+        env:
+          REPO_NAME: tdesktop
+
       - name: Prepare libraries
         if: steps.cache-libs.outputs.cache-hit != 'true'
         shell: cmd

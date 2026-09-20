@@ -50,15 +50,76 @@ jobs:
           path: accessibility-patch
 
       # ============================================
-      # 2. Set up Visual Studio environment
+      # 2. Visual Studio ATL (breakpad dump_syms on cold cache)
+      #     Mirrors telegramdesktop/tdesktop canary workflow: prepare.py
+      #     builds breakpad with MSVC toolset 14.44, which needs ATL headers.
+      # ============================================
+      - name: Install Visual Studio ATL component
+        shell: pwsh
+        run: |
+          $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
+          $vswhere = Join-Path $installer 'vswhere.exe'
+          $setup = Join-Path $installer 'setup.exe'
+          if (-not (Test-Path $vswhere) -or -not (Test-Path $setup)) {
+            throw "Visual Studio Installer is incomplete at $installer."
+          }
+
+          $toolsComponent = 'Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64'
+          $atlComponent = 'Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL'
+          $path = @(& $vswhere -latest -products '*' -requires $toolsComponent -property installationPath)[0]
+          if (-not $path) {
+            throw "No Visual Studio instance provides $toolsComponent."
+          }
+
+          $toolset = Get-ChildItem (Join-Path $path 'VC\Tools\MSVC') -Directory `
+            | Where-Object { $_.Name -like '14.44.*' } `
+            | Sort-Object Name -Descending `
+            | Select-Object -First 1
+          if (-not $toolset) {
+            throw "The selected Visual Studio instance has no 14.44 toolset."
+          }
+          $header = Join-Path $toolset.FullName 'atlmfc\include\atlbase.h'
+          if (Test-Path $header) {
+            Write-Host "ATL is already installed for $($toolset.Name)."
+            exit 0
+          }
+
+          $process = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
+            'modify',
+            '--installPath', "`"$path`"",
+            '--add', $atlComponent,
+            '--quiet', '--norestart', '--nocache'
+          )
+          if ($process.ExitCode -notin @(0, 3010)) {
+            throw "Visual Studio Installer exited with $($process.ExitCode)."
+          }
+          if (-not (Test-Path $header)) {
+            throw "$atlComponent completed without installing $header."
+          }
+
+      # ============================================
+      # 3. Set up Visual Studio environment
       # ============================================
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+          toolset: 14.44
+
+      - name: Verify Visual Studio ATL headers
+        shell: pwsh
+        run: |
+          $atlInclude = Join-Path $env:VCToolsInstallDir 'atlmfc\include'
+          $header = Join-Path $atlInclude 'atlbase.h'
+          if (-not (Test-Path $header)) {
+            throw "The selected toolset has no ATL header at $header."
+          }
+          if (($env:INCLUDE -split ';') -notcontains $atlInclude) {
+            throw "The selected toolset did not add $atlInclude to INCLUDE."
+          }
 
       # ============================================
-      # 3. Install build tools
+      # 4. Install build tools
       # ============================================
       - name: Install tools
         run: |

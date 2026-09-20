@@ -38,7 +38,7 @@
 | Детальная разметка **HistoryView** (`MessageSubItem`, sub-elements) | Более точная озвучка частей сообщения без костылей |
 | Открытые PR: заголовки поиска ([#30722](https://github.com/telegramdesktop/tdesktop/pull/30722)), **PeerList** ([#30755](https://github.com/telegramdesktop/tdesktop/pull/30755)) | Следить и портировать после мержа |
 
-Обновление базовой версии tdesktop в CI и скрипт `scripts/a11y_upstream_patches.py` — основной способ подтянуть совместимые куски без дублирования.
+База tdesktop **зафиксирована** тегом `TDESKTOP_REF` в CI (см. [docs/UPSTREAM_BUMP.md](docs/UPSTREAM_BUMP.md)). Поднятие версии — по чеклисту там; скрипт `scripts/a11y_upstream_patches.py` — для точечных правок поверх выбранного тега.
 
 ### Что у нас сильнее — кандидаты на upstream
 

@@ -42,6 +42,8 @@ Re-running the patch script on an already-patched tree may error; use a fresh cl
 
 Trigger: push to `main`/`dev`, tag `v*`, or **Actions → Windows Accessible Build → Run workflow**. Secrets: `API_ID`, `API_HASH`.
 
+Upstream base is pinned: **`TDESKTOP_REF`** in `.github/workflows/build-windows.yml` (default tag, not floating `main`). Bump procedure: [docs/UPSTREAM_BUMP.md](docs/UPSTREAM_BUMP.md). Manual workflow run can pass input **`tdesktop_ref`** to test another tag/branch without changing the pin.
+
 ### Editing conventions
 
 - Human-readable control names: `accessibility/telegram_accessibility_names.h`

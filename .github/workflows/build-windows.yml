@@ -2899,26 +2899,30 @@ jobs:
 
       # ============================================
       # 9d. Pagefile — final Telegram.exe link can hit LNK1102 on 16 GB runners.
+      #     Win32_PageFileSetting CIM create is brittle on GHA; use WMI + D: when free.
       # ============================================
       - name: Expand Windows pagefile for linker
         shell: pwsh
         run: |
-          $cs = Get-CimInstance Win32_ComputerSystem -EnableAllPrivileges
-          Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $false }
-          $pf = Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue
+          $ErrorActionPreference = 'Stop'
+          $sys = Get-WmiObject Win32_ComputerSystem -EnableAllPrivileges
+          $sys.AutomaticManagedPagefile = $false
+          [void]$sys.Put()
+
+          $drive = if (Test-Path 'D:\') { 'D' } else { 'C' }
+          $name = "${drive}:\pagefile.sys"
+          $pf = Get-WmiObject Win32_PageFileSetting -ErrorAction SilentlyContinue
           if (-not $pf) {
-            $pf = New-CimInstance -ClassName Win32_PageFileSetting -Property @{
-              Name = 'C:\pagefile.sys'
-              InitialSize = 49152
-              MaximumSize = 49152
-            }
-          } else {
-            Set-CimInstance -InputObject $pf -Property @{
-              InitialSize = 49152
-              MaximumSize = 49152
-            }
+            $pf = ([wmiclass]'Win32_PageFileSetting').CreateInstance()
           }
-          Get-CimInstance Win32_PageFileSetting | Format-List Name, InitialSize, MaximumSize
+          $pf.Name = $name
+          $pf.InitialSize = 49152
+          $pf.MaximumSize = 49152
+          [void]$pf.Put()
+
+          Get-WmiObject Win32_PageFileSetting |
+            Select-Object Name, InitialSize, MaximumSize |
+            Format-List
 
       # ============================================
       # 10. Configure
@@ -2955,6 +2959,7 @@ jobs:
               -D TDESKTOP_API_HASH=${{ secrets.API_HASH }} ^
               -D CMAKE_POLICY_DEFAULT_CMP0141=NEW ^
               -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded ^
+              -D CMAKE_EXE_LINKER_FLAGS="/DEBUG:FASTLINK /CGTHREADS:1" ^
               -D CMAKE_CXX_COMPILER_LAUNCHER=sccache ^
               -D CMAKE_C_COMPILER_LAUNCHER=sccache
 
@@ -2977,8 +2982,9 @@ jobs:
         run: |
           cd %REPO_NAME%
           set _CL_=/Z7 %_CL_%
-          rem LNK1102: cap linker threads; pagefile step above adds virtual memory.
-          set _LINK_=/CGTHREADS:1 %_LINK_%
+          rem Free RAM before the final link (sccache daemon + pagefile above).
+          sccache --stop-server 2>nul
+          set _LINK_=/DEBUG:FASTLINK /CGTHREADS:1 %_LINK_%
           cmake --build out --config Release --target Telegram --parallel 2
           set BUILD_RC=%ERRORLEVEL%
           sccache --show-stats || rem ignore if sccache absent

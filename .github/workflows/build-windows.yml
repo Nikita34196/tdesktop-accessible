@@ -1697,6 +1697,14 @@ jobs:
                   print(f'WARNING: missing {p} — skipping message summary patch')
                   exit(0)
 
+          with open(cpp_path, 'r', encoding='utf-8') as f:
+              cpp_probe = f.read()
+          if ('HistoryView::MessageAccessibilityName(' in cpp_probe
+                  and 'QString HistoryInner::accessibilityChildName(int index)' in cpp_probe):
+              print('Step 7h skipped: upstream MessageAccessibilityName already used '
+                    'for accessibilityChildName')
+              exit(0)
+
           summary_fn = r'''
           QString HistoryInner::a11yMessageSummaryForView(
                   not_null<Element*> view) const {

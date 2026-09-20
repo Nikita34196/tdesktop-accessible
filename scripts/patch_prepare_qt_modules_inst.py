@@ -9,6 +9,9 @@ ROOT = os.environ.get('REPO_NAME', 'tdesktop')
 PREPARE = f'{ROOT}/Telegram/build/prepare/prepare.py'
 MARKER = 'a11y-ci-qt-modules-inst'
 
+# Upstream tdesktop (2026+) retries jom instead of relying on mkdir races.
+UPSTREAM_JOM_RETRY = 'jom -j%NUMBER_OF_PROCESSORS% || jom -j%NUMBER_OF_PROCESSORS%'
+
 OLD = (
     '        -platform win32-msvc\n'
     '\n'
@@ -43,6 +46,13 @@ def main() -> None:
 
     if MARKER in src:
         print(f'{PREPARE} already patched ({MARKER})')
+        return
+
+    if UPSTREAM_JOM_RETRY in src:
+        print(
+            f'{PREPARE}: upstream Qt jom retry already present; '
+            f'skipping {MARKER} patch'
+        )
         return
 
     if OLD not in src:
